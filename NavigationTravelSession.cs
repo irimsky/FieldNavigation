@@ -323,6 +323,13 @@ public sealed class NavigationTravelSession : IDisposable
         };
     }
 
+    /// <summary>Call on Framework ticks, including after cancellation or while the host is paused.</summary>
+    public void PumpCancellation()
+    {
+        if (!this.disposed)
+            this.navigation.PumpCancellation();
+    }
+
     public void Cancel()
     {
         if (this.disposed)
