@@ -42,9 +42,9 @@ public sealed class NoFlyZoneCatalog(
     };
     private static readonly NoFlyMapRectangle[] defaultMapRectangles =
     {
-        // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.5, 20.7)。
+        // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.4, 20.9)。
         new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
-            "试验矩形禁飞区·南萨纳兰", new Vector2(27.5f, 20.7f)),
+            "试验矩形禁飞区·南萨纳兰", new Vector2(27.4f, 20.9f)),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
