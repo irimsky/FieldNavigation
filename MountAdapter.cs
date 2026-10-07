@@ -63,10 +63,16 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         : condition[ConditionFlag.Casting] ? "施法中"
         : this.IsJumping ? "跳跃中" : string.Empty;
 
-    public bool TryMount() => this.mountRequests.TryRequest(DateTime.UtcNow, this.State, this.CanAttemptMount, this.RequestMount);
+    public bool TryMount() => this.TryMount(null);
 
-    private bool RequestMount()
+    public bool TryMount(Action? onRequest) => this.mountRequests.TryRequest(
+        DateTime.UtcNow, this.State, this.CanAttemptMount, () => this.RequestMount(onRequest));
+
+    private bool RequestMount(Action? onRequest)
     {
+        ActionManager* manager = ActionManager.Instance();
+        if (manager == null || manager->GetActionStatus(ActionType.GeneralAction, MountRouletteActionId) != 0)
+            return false;
         TargetSystem* targets = TargetSystem.Instance();
         if (targets != null)
         {
@@ -74,9 +80,19 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
             targets->SoftTarget = null;
         }
 
-        ActionManager* manager = ActionManager.Instance();
-        return manager != null
-            && manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
+        onRequest?.Invoke();
+        return manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
+    }
+
+    /// <summary>The host must validate ownership and character before cancelling its mount request.</summary>
+    public void CancelMountCast()
+    {
+        var player = objectTable.LocalPlayer;
+        if (player is not { IsCasting: true } || !(player.CastActionType == (byte)ActionType.Mount
+            || player.CastActionType == (byte)ActionType.GeneralAction && player.CastActionId == 9))
+            return;
+        var ui = FFXIVClientStructs.FFXIV.Client.Game.UI.UIState.Instance();
+        if (ui != null) ui->Hotbar.CancelCast();
     }
 
     public bool TryDismount()

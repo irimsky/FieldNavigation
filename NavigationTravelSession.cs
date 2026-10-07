@@ -71,6 +71,8 @@ public sealed class NavigationTravelOptions
     public Vector3? NoFlyLandingPoint { get; init; }
     /// <summary>Short relocation of an already airborne character to a host-validated landing point.</summary>
     public bool LandingApproach { get; init; }
+    public bool CompleteAtResolvedDestination { get; init; } = true;
+    public float MinimumProgressDisplacement { get; init; } = 1.5f;
 }
 
 /// <summary>All host-owned observations needed to advance one travel session.</summary>
@@ -81,7 +83,9 @@ public readonly record struct NavigationTravelFrame(
     bool Arrived,
     bool InsideNoFly,
     FlightState Flight,
-    Vector3? NoFlyLandingPoint = null);
+    Vector3? NoFlyLandingPoint = null,
+    bool MovementReady = true,
+    bool LandAtDestination = false);
 
 /// <summary>One result from a navigation session tick. Hosts map terminal results to business states.</summary>
 public readonly record struct NavigationTravelUpdate(
@@ -128,6 +132,7 @@ public sealed class NavigationTravelSession : IDisposable
     private bool jumpAttempted;
     private bool flightRecoveryAttempted;
     private bool forceGroundAfterLanding;
+    private bool completingAfterLanding;
     private bool disposed;
 
     public NavigationTravelSession(
@@ -177,6 +182,8 @@ public sealed class NavigationTravelSession : IDisposable
         this.flightRecoveryAttempted = false;
         this.landingStartedAt = DateTime.MinValue;
         this.forceGroundAfterLanding = false;
+        this.completingAfterLanding = false;
+        this.navigation.Progress.MinimumDisplacement = options.MinimumProgressDisplacement;
         bool groundOnly = insideNoFly && !options.LandingApproach;
         this.noFly.Begin(now, groundOnly);
         this.mode = groundOnly ? NavigationTravelMode.Ground : ToMode(options.InitialIntent);
@@ -241,8 +248,23 @@ public sealed class NavigationTravelSession : IDisposable
             this.navigation.Cancel();
         }
 
+        if (this.mode == NavigationTravelMode.Ground && frame.Flight.InFlight && this.IsNoFlyGroundReason())
+            return this.BeginLanding(frame, "禁飞区地面导航要求先完成落地",
+                frame.NoFlyLandingPoint ?? this.options.NoFlyLandingPoint);
+
+        if (frame.Arrived && frame.LandAtDestination && frame.Flight.InFlight)
+        {
+            this.completingAfterLanding = true;
+            this.state = NavigationTravelState.Landing;
+            this.landingStartedAt = frame.Now;
+            this.navigation.Cancel();
+            this.landing.BeginVerticalDescent();
+            return this.TickLanding(frame) with { Reason = "已到达宿主核验落点，垂直下降" };
+        }
+
         if (this.mode == NavigationTravelMode.Ground && frame.Flight.InFlight)
-            return this.BeginLanding(frame, "地面导航要求先完成落地");
+            return this.BeginLanding(frame, "地面导航要求先完成落地",
+                frame.NoFlyLandingPoint ?? this.options.NoFlyLandingPoint);
 
         if (frame.Arrived)
         {
@@ -258,7 +280,7 @@ public sealed class NavigationTravelSession : IDisposable
         // the original (possibly unreachable) coordinate would be reported as a stall.
         // Complete the navigation here and let the host apply its own arrival policy
         // against the business destination.
-        if (this.navigation.IsAtResolvedDestination(frame.Position))
+        if (this.options.CompleteAtResolvedDestination && this.navigation.IsAtResolvedDestination(frame.Position))
         {
             this.navigation.Cancel();
             this.landing.Reset();
@@ -270,6 +292,10 @@ public sealed class NavigationTravelSession : IDisposable
                 LandingStatus.Landed,
                 "已到达导航实际解析终点");
         }
+
+        if (!frame.MovementReady)
+            return this.Update(NavigationTravelOutcome.Progress, NavigationRequestResult.NotDue,
+                NavigationRejection.None, LandingStatus.Descending, "等待坐骑和移动条件就绪");
 
         if (this.navigation.Operation.RequestIssued)
         {
@@ -327,8 +353,8 @@ public sealed class NavigationTravelSession : IDisposable
     {
         if (this.disposed)
             return;
-        this.navigation.Cancel();
-        this.landing.Reset();
+        try { this.navigation.Cancel(); }
+        finally { this.landing.Reset(); }
         this.noFly.Reset();
         this.state = NavigationTravelState.Cancelled;
         this.mode = NavigationTravelMode.Ground;
@@ -353,6 +379,14 @@ public sealed class NavigationTravelSession : IDisposable
         LandingStatus status = this.landing.Update(frame.Now, frame.Position, frame.Flight);
         if (status == LandingStatus.Landed)
         {
+            if (this.completingAfterLanding)
+            {
+                this.navigation.Cancel();
+                this.landing.Reset();
+                this.state = NavigationTravelState.Completed;
+                return this.Update(NavigationTravelOutcome.Arrived, NavigationRequestResult.NotDue,
+                    NavigationRejection.None, status, "已到达并完成落地稳定");
+            }
             // Landing owns the boundary debounce while descent is active. Re-evaluate once
             // with landing=false after stability is confirmed so an already completed one-second
             // exit debounce can immediately restore the original flight intent on this tick.
@@ -446,7 +480,7 @@ public sealed class NavigationTravelSession : IDisposable
             return this.BeginJump(frame, $"地面导航 5 秒无有效位移：{reason}");
 
         if (this.initialIntent == NavigationTravelIntent.Ground && this.options.AllowFlightRecovery
-            && !this.flightRecoveryAttempted)
+            && !this.noFly.GroundOnly && !this.flightRecoveryAttempted)
         {
             this.flightRecoveryAttempted = true;
             this.failureStage = NavigationFailureStage.FlightRecovery;
