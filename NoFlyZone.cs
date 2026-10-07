@@ -7,6 +7,7 @@ using Lumina.Excel.Sheets;
 namespace FieldNavigation;
 
 /// <summary>A map volume where travel must use ground navigation.</summary>
+/// <remarks>The optional landing point stores world X/Z with a placeholder Y; landing resolves its floor.</remarks>
 public readonly record struct NoFlyZone(
     uint TerritoryId,
     Vector3 Center,
@@ -26,8 +27,7 @@ public readonly record struct NoFlyMapRectangle(
     Vector2 FirstMapCoordinate,
     Vector2 SecondMapCoordinate,
     string Name,
-    Vector2? LandingMapCoordinate = null,
-    float LandingHeight = 0f);
+    Vector2? LandingMapCoordinate = null);
 
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
@@ -42,9 +42,9 @@ public sealed class NoFlyZoneCatalog(
     };
     private static readonly NoFlyMapRectangle[] defaultMapRectangles =
     {
-        // 试验区域：南萨纳兰 (29.2, 21.3) 到 (36.2, 17.2)，指定落点 (29.0, 20.3)，高度 0.3。
-        new(146, new Vector2(29.2f, 21.3f), new Vector2(36.2f, 17.2f),
-            "试验矩形禁飞区·南萨纳兰", new Vector2(29.0f, 20.3f), 0.3f),
+        // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.5, 20.7)。
+        new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
+            "试验矩形禁飞区·南萨纳兰", new Vector2(27.5f, 20.7f)),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
@@ -111,7 +111,7 @@ public sealed class NoFlyZoneCatalog(
         Vector3 min = Vector3.Min(first, second);
         Vector3 max = Vector3.Max(first, second);
         Vector3? landingPoint = rectangle.LandingMapCoordinate is { } landingCoordinate
-            ? ToLandingPoint(ConvertMapCoordinate(map, landingCoordinate), rectangle.LandingHeight)
+            ? ConvertMapCoordinate(map, landingCoordinate)
             : null;
         return new(
             rectangle.TerritoryId,
@@ -125,7 +125,4 @@ public sealed class NoFlyZoneCatalog(
         (coordinate.X - 1f - 2048f / map.SizeFactor) / 0.02f - map.OffsetX,
         0f,
         (coordinate.Y - 1f - 2048f / map.SizeFactor) / 0.02f - map.OffsetY);
-
-    private static Vector3 ToLandingPoint(Vector3 mapPosition, float height) =>
-        new(mapPosition.X, height, mapPosition.Z);
 }

@@ -58,18 +58,22 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
             {
                 if (!IsFinite(configured))
                     return LandingStatus.WaitingForPath;
-                if (Vector3.DistanceSquared(origin, configured) <= 9f)
+                if (!backend.TryResolveTravelGroundDestination(
+                        configured, mapWaypoint: true, out Vector3 resolved, out _)
+                    || !IsFinite(resolved))
+                    return LandingStatus.WaitingForPath;
+                if (Vector3.DistanceSquared(origin, resolved) <= 9f)
                 {
                     this.pointAttempted = true;
                 }
                 else
                 {
                     descent.StopDescending();
-                    if (backend.MoveTo(configured, fly: true))
+                    if (backend.MoveTo(resolved, fly: true))
                     {
                         this.pointAttempted = true;
                         this.approachIssued = true;
-                        this.Destination = configured;
+                        this.Destination = resolved;
                         return LandingStatus.Approaching;
                     }
 
@@ -129,7 +133,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         this.lastGroundedPosition = null;
     }
 
-    /// <summary>Uses a host-configured world point instead of querying the nearest floor.</summary>
+    /// <summary>Uses a host-configured planar point and resolves its floor instead of searching around the player.</summary>
     public void SetPreferredDestination(Vector3? destination) => this.preferredDestination = destination;
 
     /// <summary>The host has already reached a validated floor point; descend without another floor search.</summary>
