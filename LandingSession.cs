@@ -11,6 +11,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
     private bool pointAttempted;
     private DateTime? settledSince;
     private Vector3? lastGroundedPosition;
+    private Vector3? preferredDestination;
     private const float GroundedMovementThresholdSquared = 0.25f;
     public Vector3? Destination { get; private set; }
     public DateTime? SettledSince => this.settledSince;
@@ -53,16 +54,47 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         }
         if (!this.pointAttempted && position is { } origin)
         {
-            this.pointAttempted = true;
-            Vector3? point = backend.FindNearestReachablePoint(origin, 30f, 120f);
-            if (point is { } reachable && Vector3.DistanceSquared(origin, reachable) > 9f)
+            if (this.preferredDestination is { } configured)
             {
-                descent.StopDescending();
-                if (backend.MoveTo(reachable, fly: true))
+                if (!IsFinite(configured))
+                    return LandingStatus.WaitingForPath;
+                if (!backend.TryResolveTravelGroundDestination(
+                        configured, mapWaypoint: true, out Vector3 resolved, out _)
+                    || !IsFinite(resolved))
+                    return LandingStatus.WaitingForPath;
+                if (Vector3.DistanceSquared(origin, resolved) <= 9f)
                 {
-                    this.approachIssued = true;
-                    this.Destination = reachable;
-                    return LandingStatus.Approaching;
+                    this.pointAttempted = true;
+                }
+                else
+                {
+                    descent.StopDescending();
+                    if (backend.MoveTo(resolved, fly: true))
+                    {
+                        this.pointAttempted = true;
+                        this.approachIssued = true;
+                        this.Destination = resolved;
+                        return LandingStatus.Approaching;
+                    }
+
+                    // Keep the configured point authoritative. A rejected request is retried
+                    // until the travel session's landing timeout, rather than descending elsewhere.
+                    return LandingStatus.WaitingForPath;
+                }
+            }
+            else
+            {
+                this.pointAttempted = true;
+                Vector3? point = backend.FindNearestReachablePoint(origin, 30f, 120f);
+                if (point is { } reachable && Vector3.DistanceSquared(origin, reachable) > 9f)
+                {
+                    descent.StopDescending();
+                    if (backend.MoveTo(reachable, fly: true))
+                    {
+                        this.approachIssued = true;
+                        this.Destination = reachable;
+                        return LandingStatus.Approaching;
+                    }
                 }
             }
         }
@@ -76,6 +108,17 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
             if (backend.IsMoveActive)
                 return LandingStatus.WaitingForPath;
         }
+        if (this.approachIssued && this.preferredDestination is not null
+            && (position is not { } currentPosition || this.Destination is not { } configuredTarget
+                || Vector3.DistanceSquared(currentPosition, configuredTarget) > 9f))
+        {
+            // A configured point is authoritative. If vnavmesh ended elsewhere, retry the
+            // approach instead of silently descending at an unintended location.
+            this.approachIssued = false;
+            this.pointAttempted = false;
+            this.Destination = null;
+            return LandingStatus.WaitingForPath;
+        }
         descent.BeginDescending();
         return LandingStatus.Descending;
     }
@@ -85,7 +128,21 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         descent.StopDescending();
         this.approachIssued = this.pointAttempted = false;
         this.Destination = null;
+        this.preferredDestination = null;
         this.settledSince = null;
         this.lastGroundedPosition = null;
     }
+
+    /// <summary>Uses a host-configured planar point and resolves its floor instead of searching around the player.</summary>
+    public void SetPreferredDestination(Vector3? destination) => this.preferredDestination = destination;
+
+    /// <summary>The host has already reached a validated floor point; descend without another floor search.</summary>
+    public void BeginVerticalDescent()
+    {
+        this.Reset();
+        this.pointAttempted = true;
+    }
+
+    private static bool IsFinite(Vector3 value) =>
+        float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
 }
