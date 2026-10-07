@@ -73,6 +73,20 @@ public sealed class NavigationSession<TPurpose>(INavigationBackend backend) wher
             this.Operation.CommandStartedAt, backend.IsMoveInProgress, backend.IsPathRunning, stuckTimeout,
             noPathTimeout);
 
+    /// <summary>
+    /// Returns true when the backend has finished at the endpoint it actually accepted.
+    /// A map waypoint may be resolved to a nearby reachable floor point, so this endpoint
+    /// can differ materially from the business destination supplied by the host.
+    /// </summary>
+    public bool IsAtResolvedDestination(Vector3 position, float tolerance = 3f)
+    {
+        Vector3? resolved = this.Operation.ResolvedDestination;
+        return this.Operation.RequestIssued
+            && resolved.HasValue
+            && !backend.IsMoveActive
+            && Vector3.DistanceSquared(position, resolved.Value) <= tolerance * tolerance;
+    }
+
     public void Cancel()
     {
         this.cancellationPending |= backend.IsMoveInProgress;

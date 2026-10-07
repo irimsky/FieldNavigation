@@ -88,4 +88,11 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         this.settledSince = null;
         this.lastGroundedPosition = null;
     }
+
+    /// <summary>The host has already reached a validated floor point; descend without another floor search.</summary>
+    public void BeginVerticalDescent()
+    {
+        this.Reset();
+        this.pointAttempted = true;
+    }
 }
