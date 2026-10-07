@@ -7,7 +7,12 @@ using Lumina.Excel.Sheets;
 namespace FieldNavigation;
 
 /// <summary>A map volume where travel must use ground navigation.</summary>
-public readonly record struct NoFlyZone(uint TerritoryId, Vector3 Center, Vector3 HalfExtents, string Name)
+public readonly record struct NoFlyZone(
+    uint TerritoryId,
+    Vector3 Center,
+    Vector3 HalfExtents,
+    string Name,
+    Vector3? LandingPoint = null)
 {
     public bool Contains(Vector3 position) =>
         MathF.Abs(position.X - this.Center.X) <= this.HalfExtents.X
@@ -20,7 +25,9 @@ public readonly record struct NoFlyMapRectangle(
     uint TerritoryId,
     Vector2 FirstMapCoordinate,
     Vector2 SecondMapCoordinate,
-    string Name);
+    string Name,
+    Vector2? LandingMapCoordinate = null,
+    float LandingHeight = 0f);
 
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
@@ -35,8 +42,9 @@ public sealed class NoFlyZoneCatalog(
     };
     private static readonly NoFlyMapRectangle[] defaultMapRectangles =
     {
-        // 试验区域：南萨纳兰 (29.2, 21.3) 到 (36.2, 17.2)。
-        new(146, new Vector2(29.2f, 21.3f), new Vector2(36.2f, 17.2f), "试验矩形禁飞区·南萨纳兰"),
+        // 试验区域：南萨纳兰 (29.2, 21.3) 到 (36.2, 17.2)，指定落点 (29.0, 20.3)，高度 0.3。
+        new(146, new Vector2(29.2f, 21.3f), new Vector2(36.2f, 17.2f),
+            "试验矩形禁飞区·南萨纳兰", new Vector2(29.0f, 20.3f), 0.3f),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
@@ -102,15 +110,22 @@ public sealed class NoFlyZoneCatalog(
         Vector3 second = ConvertMapCoordinate(map, rectangle.SecondMapCoordinate);
         Vector3 min = Vector3.Min(first, second);
         Vector3 max = Vector3.Max(first, second);
+        Vector3? landingPoint = rectangle.LandingMapCoordinate is { } landingCoordinate
+            ? ToLandingPoint(ConvertMapCoordinate(map, landingCoordinate), rectangle.LandingHeight)
+            : null;
         return new(
             rectangle.TerritoryId,
             new Vector3((min.X + max.X) * 0.5f, 0f, (min.Z + max.Z) * 0.5f),
             new Vector3((max.X - min.X) * 0.5f, float.MaxValue, (max.Z - min.Z) * 0.5f),
-            rectangle.Name);
+            rectangle.Name,
+            landingPoint);
     }
 
     public static Vector3 ConvertMapCoordinate(Map map, Vector2 coordinate) => new(
         (coordinate.X - 1f - 2048f / map.SizeFactor) / 0.02f - map.OffsetX,
         0f,
         (coordinate.Y - 1f - 2048f / map.SizeFactor) / 0.02f - map.OffsetY);
+
+    private static Vector3 ToLandingPoint(Vector3 mapPosition, float height) =>
+        new(mapPosition.X, height, mapPosition.Z);
 }
