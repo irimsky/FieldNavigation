@@ -12,7 +12,11 @@ public sealed record TravelRequest
     public TravelModePolicy Movement { get; init; } = new();
     public TravelArrivalPolicy Arrival { get; init; } = new();
     public bool FindApproachPoint { get; init; }
+    public bool StopOnStall { get; init; }
     public Vector3? LandingPoint { get; init; }
+    public Vector3? ApproachPoint { get; init; }
+    public Vector3? RequiredArrivalPoint { get; init; }
+    public float RequiredArrivalPointRadius { get; init; } = 1;
     public float LandingRadius { get; init; } = 5;
     public float FlightHeight { get; init; } = 4;
     public float PathArrivalRadius { get; init; } = .5f;
@@ -91,9 +95,9 @@ public sealed class TravelJourney : IDisposable
     {
         this.travel.Cancel(); this.landing.Reset(); this.movement.ResetTakeoff();
         this.routeStarted = false; this.settled = null;
-        this.approach = this.request!.FindApproachPoint
+        this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
-            : this.target;
+            : this.target);
         this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly && !frame.InsideNoFly);
         this.Change(TravelJourneyState.Preparing, "准备前往目标");
     }
@@ -116,7 +120,7 @@ public sealed class TravelJourney : IDisposable
         if (!this.backend.IsAvailable) return this.Fail("导航后端不可用");
         if (!frame.MovementReady) { this.backend.Stop(); this.routeStarted = false; this.settled = null; return this.Update(NavigationTravelOutcome.Progress, "等待移动条件"); }
 
-        bool inRange = this.request.Arrival.Contains(frame.Position, this.target);
+        bool inRange = this.ContainsGoal(frame.Position);
         bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
         Vector3 landingPoint = this.request.LandingPoint ?? this.approach;
         if (this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling)
@@ -211,7 +215,7 @@ public sealed class TravelJourney : IDisposable
             this.travel.Start(frame.Now, frame.Position, destination, frame.InsideNoFly, new()
             {
                 InitialIntent = fly ? NavigationTravelIntent.Fly : NavigationTravelIntent.Ground,
-                CompleteAtResolvedDestination = false, AllowFlightRecovery = false,
+                CompleteAtResolvedDestination = false, AllowFlightRecovery = false, StopOnStall = this.request!.StopOnStall,
                 NoFlyLandingPoint = frame.NoFlyLandingPoint, LandingTimeout = this.request!.LandingTimeout,
                 StallTimeout = this.request.StallTimeout, NoPathTimeout = this.request.NoPathTimeout,
                 OperationTimeout = this.request.OperationTimeout, MinimumProgressDisplacement = final ? .25f : 1.5f,
@@ -225,7 +229,7 @@ public sealed class TravelJourney : IDisposable
         if (result.Outcome == NavigationTravelOutcome.Arrived)
         {
             this.routeStarted = false;
-            if (final && !this.request.Arrival.Contains(frame.Position, this.target)) return this.Fail("路线结束但未满足实际目标范围");
+            if (final && !this.ContainsGoal(frame.Position)) return this.Fail("路线结束但未满足实际目标范围");
             this.Change(fly && (this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted)
                 ? TravelJourneyState.Landing : TravelJourneyState.Dismounting, "路线结束，核验交接条件");
         }
@@ -233,6 +237,10 @@ public sealed class TravelJourney : IDisposable
         return this.Update(NavigationTravelOutcome.Progress, result.Reason);
     }
 
+    private bool ContainsGoal(Vector3 position) => this.request!.Arrival.Contains(position, this.target)
+        && (this.request.RequiredArrivalPoint is not { } point
+            || TravelGeometry.HorizontalDistance(position, point) <= this.request.RequiredArrivalPointRadius
+                && MathF.Abs(position.Y - point.Y) <= this.request.Arrival.HeightTolerance);
     private void Pump(bool ready) { if (this.backend is INavigationPump pump) pump.Pump(ready); }
     private void Change(TravelJourneyState state, string message) { this.State = state; this.phaseStarted = Stopwatch.GetTimestamp(); this.reason = message; }
     private TravelJourneyUpdate Update(NavigationTravelOutcome outcome, string? message = null)

@@ -128,6 +128,18 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
     private static bool IsFinite(Vector3 position) =>
         float.IsFinite(position.X) && float.IsFinite(position.Y) && float.IsFinite(position.Z);
 
+    public bool TryPointOnFloor(Vector3 point, out Vector3 floor, out string failure)
+    {
+        floor = default;
+        try
+        {
+            if (this.pointOnFloor.InvokeFunc(point, true, 5) is { } value && Finite(value))
+            { floor = value; failure = ""; return true; }
+            failure = "未找到地面";
+        }
+        catch (Exception ex) { failure = ex.Message; }
+        return false;
+    }
     public void StopPath() { if (this.stop.HasAction) this.stop.InvokeAction(); }
     public void Stop() => this.StopPath();
     private static bool Finite(Vector3 position) => float.IsFinite(position.X) && float.IsFinite(position.Y) && float.IsFinite(position.Z);
