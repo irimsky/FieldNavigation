@@ -18,7 +18,7 @@ public sealed class NavigationProgressMonitor
     public float BestDistance { get; private set; } = float.MaxValue;
     public TimeSpan PathfindTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan SampleInterval { get; init; } = TimeSpan.FromSeconds(2);
-    public float MinimumDisplacement { get; init; } = 1.5f;
+    public float MinimumDisplacement { get; set; } = 1.5f;
 
     public void Start(DateTime now, Vector3 position, float distance)
     {

@@ -1,0 +1,253 @@
+using System.Diagnostics;
+using System.Numerics;
+
+namespace FieldNavigation;
+
+public enum TravelJourneyState { Idle, Preparing, Travelling, Landing, Dismounting, FinalApproach, Settling, Arrived, Failed, Cancelled }
+
+/// <summary>One business travel operation. Internal replans share the original operation budget.</summary>
+public sealed record TravelRequest
+{
+    public required Vector3 Destination { get; init; }
+    public TravelModePolicy Movement { get; init; } = new();
+    public TravelArrivalPolicy Arrival { get; init; } = new();
+    public bool FindApproachPoint { get; init; }
+    public Vector3? LandingPoint { get; init; }
+    public float LandingRadius { get; init; } = 5;
+    public float FlightHeight { get; init; } = 4;
+    public float PathArrivalRadius { get; init; } = .5f;
+    public bool DirectGroundApproach { get; init; }
+    public TimeSpan OperationTimeout { get; init; } = TimeSpan.FromMinutes(6);
+    public TimeSpan PreparationTimeout { get; init; } = TimeSpan.FromSeconds(20);
+    public TimeSpan LandingTimeout { get; init; } = TimeSpan.FromSeconds(12);
+    public TimeSpan StallTimeout { get; init; } = TimeSpan.FromSeconds(5);
+    public TimeSpan NoPathTimeout { get; init; } = TimeSpan.FromSeconds(5);
+    public int MaximumMountRequests { get; init; } = 2;
+    public int MaximumReplans { get; init; } = 8;
+}
+
+/// <summary>Immutable observations, read by the host on Framework; no native objects are retained.</summary>
+public readonly record struct TravelObservation(DateTime Now, Vector3 Position, FlightState Flight,
+    bool MountedReady, bool Dismounted, bool CanFly, bool InsideNoFly = false,
+    Vector3? NoFlyLandingPoint = null, bool MovementReady = true, bool TargetValid = true,
+    Vector3? TargetPosition = null, ulong Character = 0, uint Territory = 0);
+
+public readonly record struct TravelJourneyUpdate(TravelJourneyState State, NavigationTravelOutcome Outcome,
+    TravelMovementMode Movement, string Reason);
+
+/// <summary>Owns mode selection, mount/takeoff, landing, dismount, final walk and strict arrival.</summary>
+public sealed class TravelJourney : IDisposable
+{
+    private readonly INavigationBackend backend;
+    private readonly ITravelMovementControl movement;
+    private readonly NavigationTravelSession travel;
+    private readonly LandingSession landing;
+    private TravelRequest? request;
+    private Vector3 target, approach, routeTarget;
+    private TravelMovementMode selected;
+    private long started, phaseStarted;
+    private long? settled;
+    private Vector3 settleAnchor;
+    private bool routeStarted, ownsMount;
+    private int mountRequests, replans, cancelRequested;
+    private ulong character;
+    private uint territory;
+    private string reason = "尚未开始";
+    public TravelJourneyState State { get; private set; }
+    public TravelMovementMode Movement => this.selected;
+    public Vector3? ApproachPoint => this.request is null ? null : this.approach;
+
+    public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement)
+    {
+        this.backend = backend; this.movement = movement;
+        this.travel = new(backend, descent, movement);
+        this.landing = new(backend, descent);
+    }
+
+    public void Start(TravelRequest request, TravelObservation observation)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!TravelGeometry.IsFinite(request.Destination) || request.LandingPoint is { } p && !TravelGeometry.IsFinite(p)
+            || !float.IsFinite(request.Arrival.Radius) || request.Arrival.Radius <= 0
+            || float.IsNaN(request.Arrival.HeightTolerance) || request.Arrival.HeightTolerance < 0
+            || !float.IsFinite(request.LandingRadius) || request.LandingRadius <= 0
+            || !float.IsFinite(request.FlightHeight) || request.FlightHeight < 0
+            || !float.IsFinite(request.PathArrivalRadius) || request.PathArrivalRadius <= 0
+            || request.OperationTimeout <= TimeSpan.Zero || request.PreparationTimeout <= TimeSpan.Zero
+            || request.LandingTimeout <= TimeSpan.Zero || request.Arrival.SettleDuration < TimeSpan.Zero
+            || request.MaximumMountRequests <= 0 || request.MaximumReplans < 0)
+            throw new ArgumentOutOfRangeException(nameof(request));
+        this.Cancel();
+        this.request = request;
+        this.character = observation.Character; this.territory = observation.Territory;
+        this.started = Stopwatch.GetTimestamp();
+        this.mountRequests = this.replans = 0;
+        Volatile.Write(ref this.cancelRequested, 0);
+        this.target = request.Destination;
+        this.Plan(observation);
+    }
+
+    private void Plan(TravelObservation frame)
+    {
+        this.travel.Cancel(); this.landing.Reset(); this.movement.ResetTakeoff();
+        this.routeStarted = false; this.settled = null;
+        this.approach = this.request!.FindApproachPoint
+            ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
+            : this.target;
+        this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly && !frame.InsideNoFly);
+        this.Change(TravelJourneyState.Preparing, "准备前往目标");
+    }
+
+    public TravelJourneyUpdate Tick(TravelObservation frame)
+    {
+        if (this.request is null) return this.Update(NavigationTravelOutcome.None);
+        if (Volatile.Read(ref this.cancelRequested) != 0) { this.Cancel(); return this.Update(NavigationTravelOutcome.Cancelled); }
+        if (this.State is TravelJourneyState.Cancelled or TravelJourneyState.Failed)
+            return this.Update(this.State == TravelJourneyState.Failed ? NavigationTravelOutcome.Failed : NavigationTravelOutcome.Cancelled);
+        if (!frame.TargetValid || !TravelGeometry.IsFinite(frame.Position)
+            || frame.Character != this.character || frame.Territory != this.territory)
+            return this.Fail("目标、角色或区域已失效");
+        if (Stopwatch.GetElapsedTime(this.started) >= this.request.OperationTimeout) return this.Fail("本次前往总时间预算已耗尽");
+        if (frame.TargetPosition is { } fresh && Vector3.DistanceSquared(fresh, this.target) > 1)
+        {
+            if (!TravelGeometry.IsFinite(fresh) || ++this.replans > this.request.MaximumReplans) return this.Fail("目标持续移动，重新规划次数已耗尽");
+            this.target = fresh; this.Plan(frame);
+        }
+        if (!this.backend.IsAvailable) return this.Fail("导航后端不可用");
+        if (!frame.MovementReady) { this.backend.Stop(); this.routeStarted = false; this.settled = null; return this.Update(NavigationTravelOutcome.Progress, "等待移动条件"); }
+
+        bool inRange = this.request.Arrival.Contains(frame.Position, this.target);
+        bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
+        Vector3 landingPoint = this.request.LandingPoint ?? this.approach;
+        if (this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling)
+        {
+            if (frame.Flight.InFlight && needsLand
+                && TravelGeometry.HorizontalDistance(frame.Position, landingPoint) <= this.request.LandingRadius)
+            {
+                this.travel.Cancel(); this.routeStarted = false; this.landing.Reset();
+                this.Change(TravelJourneyState.Landing, "已进入落地距离，停止长途导航");
+            }
+            else if (inRange && (!frame.Flight.InFlight || !needsLand))
+            {
+                this.travel.Cancel(); this.routeStarted = false;
+                this.Change(TravelJourneyState.Dismounting, "已进入目标范围");
+            }
+        }
+
+        if (this.State == TravelJourneyState.Landing)
+        {
+            if (Stopwatch.GetElapsedTime(this.phaseStarted) >= this.request.LandingTimeout) return this.Fail("落地时间预算已耗尽");
+            if (this.landing.Update(frame.Now, frame.Position, frame.Flight, landingPoint) != LandingStatus.Landed)
+            { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, "正在落地并等待稳定"); }
+            this.landing.Reset();
+            this.Change(TravelJourneyState.Dismounting, "落地已稳定");
+        }
+        if (this.State == TravelJourneyState.Dismounting)
+        {
+            if (Stopwatch.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("下坐骑时间预算已耗尽");
+            if (this.request.Arrival.RequireDismounted && !frame.Dismounted)
+            { this.movement.TryDismount(); return this.Update(NavigationTravelOutcome.Progress, "等待实际下坐骑"); }
+            this.Change(TravelJourneyState.FinalApproach, "核验最终到达范围");
+        }
+        if (this.State is TravelJourneyState.FinalApproach or TravelJourneyState.Settling or TravelJourneyState.Arrived)
+        {
+            if (frame.Flight.InFlight && needsLand)
+            { this.travel.Cancel(); this.routeStarted = false; this.landing.Reset(); this.Change(TravelJourneyState.Landing, "再次进入飞行，重新落地"); return this.Update(NavigationTravelOutcome.Progress); }
+            if (this.request.Arrival.RequireDismounted && !frame.Dismounted)
+            { this.travel.Cancel(); this.routeStarted = false; this.Change(TravelJourneyState.Dismounting, "再次骑乘，等待下坐骑"); return this.Update(NavigationTravelOutcome.Progress); }
+            if (inRange && !frame.Flight.Jumping && !frame.Flight.MountTransition)
+            {
+                this.travel.Cancel(); this.routeStarted = false;
+                if (this.settled is null || Vector3.DistanceSquared(frame.Position, this.settleAnchor) > .01f)
+                { this.settled = Stopwatch.GetTimestamp(); this.settleAnchor = frame.Position; }
+                this.State = TravelJourneyState.Settling;
+                if (Stopwatch.GetElapsedTime(this.settled.Value) >= this.request.Arrival.SettleDuration)
+                { this.State = TravelJourneyState.Arrived; return this.Update(NavigationTravelOutcome.Arrived, "范围、高度、落地、坐骑及停稳条件已确认"); }
+                return this.Update(NavigationTravelOutcome.Progress, "等待位置停稳");
+            }
+            this.settled = null;
+            this.State = TravelJourneyState.FinalApproach;
+            this.selected = TravelMovementMode.Foot;
+            return this.Navigate(frame, this.approach, false, true);
+        }
+
+        bool fly = this.routeStarted ? this.travel.Mode == NavigationTravelMode.Fly : this.selected == TravelMovementMode.Fly;
+        if (frame.InsideNoFly || !frame.CanFly) fly = false;
+        if (!fly && frame.Flight.InFlight)
+        {
+            // Let the shared no-fly/recovery policy select its safe local landing point.
+            return this.Navigate(frame, landingPoint, false, false);
+        }
+        if (this.selected == TravelMovementMode.Foot && !frame.Dismounted)
+        {
+            if (Stopwatch.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("步行准备超时");
+            this.movement.TryDismount(); return this.Update(NavigationTravelOutcome.Progress, "步行前等待下坐骑");
+        }
+        if (this.selected != TravelMovementMode.Foot && !frame.MountedReady && !frame.Flight.InFlight)
+        {
+            if (Stopwatch.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("召唤坐骑超时");
+            if (this.mountRequests < this.request.MaximumMountRequests)
+                this.movement.TryMount(() => { this.ownsMount = true; this.mountRequests++; });
+            return this.Update(NavigationTravelOutcome.Progress, "等待实际骑乘");
+        }
+        this.ownsMount = false;
+        if (fly && !frame.Flight.InFlight)
+        {
+            if (Stopwatch.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("起飞超时");
+            this.movement.TryTakeoff(frame.Now); return this.Update(NavigationTravelOutcome.Progress, "等待实际起飞");
+        }
+        if (this.State == TravelJourneyState.Preparing) this.Change(TravelJourneyState.Travelling, "正在前往目标");
+        Vector3 route = fly ? landingPoint + Vector3.UnitY * this.request.FlightHeight : this.approach;
+        return this.Navigate(frame, route, fly, false);
+    }
+
+    private TravelJourneyUpdate Navigate(TravelObservation frame, Vector3 destination, bool fly, bool final)
+    {
+        if (!this.routeStarted || Vector3.DistanceSquared(this.routeTarget, destination) > .01f)
+        {
+            this.travel.Cancel();
+            if (this.backend is INavigationPump pump) pump.DirectGround = final && this.request!.DirectGroundApproach;
+            this.routeTarget = destination;
+            this.travel.Start(frame.Now, frame.Position, destination, frame.InsideNoFly, new()
+            {
+                InitialIntent = fly ? NavigationTravelIntent.Fly : NavigationTravelIntent.Ground,
+                CompleteAtResolvedDestination = false, AllowFlightRecovery = false,
+                NoFlyLandingPoint = frame.NoFlyLandingPoint, LandingTimeout = this.request!.LandingTimeout,
+                StallTimeout = this.request.StallTimeout, NoPathTimeout = this.request.NoPathTimeout,
+                OperationTimeout = this.request.OperationTimeout, MinimumProgressDisplacement = final ? .25f : 1.5f,
+            });
+            this.routeStarted = true;
+        }
+        bool arrived = Vector3.Distance(frame.Position, destination) <= this.request!.PathArrivalRadius;
+        var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
+            arrived, frame.InsideNoFly, frame.Flight, frame.NoFlyLandingPoint));
+        if (result.Outcome == NavigationTravelOutcome.Failed) return this.Fail(result.Reason);
+        if (result.Outcome == NavigationTravelOutcome.Arrived)
+        {
+            this.routeStarted = false;
+            if (final && !this.request.Arrival.Contains(frame.Position, this.target)) return this.Fail("路线结束但未满足实际目标范围");
+            this.Change(fly && (this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted)
+                ? TravelJourneyState.Landing : TravelJourneyState.Dismounting, "路线结束，核验交接条件");
+        }
+        this.Pump(true);
+        return this.Update(NavigationTravelOutcome.Progress, result.Reason);
+    }
+
+    private void Pump(bool ready) { if (this.backend is INavigationPump pump) pump.Pump(ready); }
+    private void Change(TravelJourneyState state, string message) { this.State = state; this.phaseStarted = Stopwatch.GetTimestamp(); this.reason = message; }
+    private TravelJourneyUpdate Update(NavigationTravelOutcome outcome, string? message = null)
+    { if (message is not null) this.reason = message; return new(this.State, outcome, this.selected, this.reason); }
+    private TravelJourneyUpdate Fail(string message) { this.Cancel(); this.State = TravelJourneyState.Failed; return this.Update(NavigationTravelOutcome.Failed, message); }
+    /// <summary>May be called from UI. All game actions and path cleanup run on the next Framework tick.</summary>
+    public void RequestCancel() => Volatile.Write(ref this.cancelRequested, 1);
+    public void Cancel()
+    {
+        try { this.travel.Cancel(); }
+        finally { this.landing.Reset(); this.movement.ResetTakeoff(); }
+        if (this.ownsMount) this.movement.CancelMountCast();
+        this.ownsMount = false; this.routeStarted = false; this.settled = null;
+        this.State = TravelJourneyState.Cancelled;
+        this.reason = "导航已取消";
+    }
+    public void Dispose() => this.Cancel();
+}
