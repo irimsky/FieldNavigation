@@ -1,0 +1,19 @@
+<Project>
+  <!-- Every consumer records its reviewed shared commit; local divergent source cannot build silently. -->
+  <Target Name="VerifyFieldNavigationRevision" BeforeTargets="CoreCompile">
+    <Error Condition="!Exists('$(FieldNavigationSourcePath)/TravelJourney.cs') Or !Exists('$(FieldNavigationSourcePath)/LICENSE')"
+           Text="FieldNavigation submodule is missing. Run git submodule update --init --recursive." />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)/../field-navigation.version')"
+           Text="field-navigation.version is missing; record the reviewed FieldNavigation commit." />
+    <ReadLinesFromFile File="$(MSBuildProjectDirectory)/../field-navigation.version">
+      <Output TaskParameter="Lines" PropertyName="_ExpectedFieldNavigationRevision" />
+    </ReadLinesFromFile>
+    <Exec Command="git -C &quot;$(FieldNavigationSourcePath)&quot; rev-parse HEAD" ConsoleToMSBuild="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ActualFieldNavigationRevision" />
+    </Exec>
+    <Error Condition="'$(_ActualFieldNavigationRevision)' != '$(_ExpectedFieldNavigationRevision)'"
+           Text="FieldNavigation revision mismatch: expected $(_ExpectedFieldNavigationRevision), found $(_ActualFieldNavigationRevision). Update the shared repository and all consumer pins together." />
+    <Exec Command="git -C &quot;$(FieldNavigationSourcePath)&quot; diff --quiet HEAD -- &quot;*.cs&quot; &quot;*.targets&quot;"
+          CustomErrorRegularExpression="^$" />
+  </Target>
+</Project>

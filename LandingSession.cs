@@ -14,6 +14,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
     private DateTime? settledSince;
     private Vector3? lastGroundedPosition;
     private Vector3? preferredDestination;
+    private Vector3? exactDestination;
     private const float GroundedMovementThresholdSquared = 0.25f;
     public Vector3? Destination { get; private set; }
     public DateTime? SettledSince => this.settledSince;
@@ -31,6 +32,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         if (!this.pointAttempted && landingPoint is { } exact && position is { } start && state.InFlight)
         {
             if (!IsFinite(exact)) return LandingStatus.WaitingForPath;
+            this.exactDestination = exact;
             if (backend.IsMoveActive) { backend.Stop(); return LandingStatus.WaitingForPath; }
             if (Vector3.DistanceSquared(start, exact) <= 9f) this.pointAttempted = true;
             else if (backend.MoveTo(exact, true))
@@ -138,7 +140,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
             if (backend.IsMoveActive)
                 return LandingStatus.WaitingForPath;
         }
-        if (this.approachIssued && this.preferredDestination is not null
+        if (this.approachIssued && (this.preferredDestination is not null || this.exactDestination is not null)
             && (position is not { } currentPosition || this.Destination is not { } configuredTarget
                 || Vector3.DistanceSquared(currentPosition, configuredTarget) > 9f))
         {
@@ -158,7 +160,7 @@ public sealed class LandingSession(INavigationBackend backend, IDescentControl d
         descent.StopDescending();
         this.approachIssued = this.pointAttempted = false;
         this.Destination = null;
-        this.preferredDestination = null;
+        this.preferredDestination = this.exactDestination = null;
         this.settledSince = null;
         this.lastGroundedPosition = null;
     }

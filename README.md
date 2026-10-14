@@ -1,15 +1,63 @@
 # FieldNavigation
 
-可复用的野外导航源码目录，供宿主插件作为源码 submodule 引用。
+AutoFatre、MobGrinder、AutoBTQ、AutoZodiac 共用的野外导航源码库，MIT 许可。作为固定提交的 Git submodule 编译进各插件，没有独立 DLL，也不另装导航插件。
 
-本目录不是独立项目：没有 `.csproj`、没有 DLL，也不包含目标选择、战斗或其他业务逻辑。宿主插件直接把源码编译进自身项目。
+## 谁负责什么
 
-`NavigationTravelSession` 是主要入口，负责一次导航任务的状态机，包括飞行与地面切换、禁飞区处理、落地稳定、无位移恢复和失败结果。
+| 功能 | 负责方 | 入口/参数 |
+| --- | --- | --- |
+| 选择 NPC、怪物、FATE、理符目标；决定业务是否仍有效 | 宿主 | `TravelRequest.Destination`、`TravelObservation.TargetValid/TargetPosition` |
+| 按距离/高差选择步行、地面坐骑、飞行 | FN | `TravelModePolicy`；可指定强制方式 |
+| 召唤坐骑、等待实际骑乘、起飞、有限重试 | FN | `TravelJourney`、`MountAdapter`、`TakeoffAdapter` |
+| 飞行接近高度、进入多少码开始落地 | FN | `FlightHeight`、`LandingRadius` |
+| 禁飞边界、地面降级、落地和恢复 | FN | `NoFlyTravelPolicy`、`NoFlyZoneCatalog`、`NavigationTravelSession` |
+| 指定点落地、四点换位下降、最后步行、下坐骑、停稳 | FN | `LandingPoint`、`LandingStrategy`、`DirectGroundApproach` |
+| 区分路线终点与实际目标范围/高度，确认最终到达 | FN | `TravelArrivalPolicy`、`RequiredArrivalPoint` |
+| 可取消纯算路、延迟结果丢弃、路线长度/起点偏移检查 | FN | `WaypointTravelBackend` |
+| 发现停滞、跳跃恢复、请求拒绝/算路/落地/总预算 | FN | `NavigationTravelSession`、`TravelRequest` |
+| 范围内地面候选、排除失败落点、有限换点 | FN | `AreaLandingPlanner`、`ApproachRetrySession` |
+| 约 4 码短距离脱困、12 码路线限制、实际位移及停稳 | FN | `ShortRelocationSession` |
+| 是否交互、战斗、同步等级、接交任务、暂缓目标、传送、重启 qst | 宿主 | 收到 FN 结果后执行业务，并在动作前重新核验实际目标 |
 
-宿主插件负责目标选择、业务状态、战斗、传送，以及导航结果对应的业务处理。
+## 完整前往入口
 
-`WaypointTravelBackend` 可作为 `NavigationTravelSession` 的后端，把共享导航请求转换为可取消的纯算路任务和显式路径执行。宿主先 Tick 会话完成禁飞区/取消判断，再在同一 Framework 调用 `Pump`；取消后的旧任务只观察异常，永远不会执行迟到路径。`Stop` 只停止本后端已发出的路径；`DirectGround` 支持不查询网格的直接单点步行。宿主 UI 停止先 `CancelCalculation`，后在 Framework 停止整个会话。
+`TravelJourney.Start(TravelRequest, TravelObservation)` 开始一个有总预算的操作；宿主每个 Framework tick 提供一次不可变观察并调用 `Tick`。不传 `arrived` 布尔值，库自行判断。
 
-`MountAdapter` 和 `TakeoffAdapter` 提供坐骑、下坐骑及稳定一秒后只请求一次起飞；实际 InFlight 仍由宿主观察。Frame 的 `MovementReady` 用于阻止坐骑未就绪时的普通路线请求，同时保留禁飞检测与落地推进。`LandAtDestination` 在宿主确认到达后垂直下降并等待落地稳定；`CompleteAtResolvedDestination=false` 让严格的 NPC/理符业务范围成为唯一到达依据。禁飞区内的地面卡住恢复不会重新切回飞行。
+```csharp
+journey.Start(new TravelRequest
+{
+    Destination = npcPosition,
+    FindApproachPoint = true,
+    Movement = new() { WalkDistance = 20, GroundMountDistance = 25 },
+    LandingRadius = 5,
+    Arrival = new() { Radius = 5, HeightTolerance = 2,
+        RequireGrounded = true, RequireDismounted = true },
+}, observation);
 
-需要在寻路完成后核验整条路线再开始移动的宿主，可使用 `IWaypointNavigationBackend` 与 `VnavmeshWaypointIpc`。`FindPath` 通过可取消IPC只计算路径，返回任务本身不会启动移动；`MovePath` 单独执行宿主已核验的路径，也支持无需网格的单点直接步行。`IsLoaded` 与 `IsReady` 分开表示接口可用和网格已就绪，`IsBusy` 同时检查其他寻路与路径执行；`StopPath` 将IPC错误交给宿主自己的清理策略。宿主保持原角色、区域、坐骑、到达范围及停止归属校验。
+var update = journey.Tick(observation);
+// Arrived 后宿主复核 NPC 身份/目标有效性，再开始自己的交互。
+```
+
+状态为 `Preparing → Travelling → Landing → Dismounting → FinalApproach → Settling → Arrived`；实际状态可以跳过不需要的步骤。换目标、切换地面/飞行和内部重新规划不会刷新总预算。终态到达仍重新核验范围和骑乘状态。`FlightHeight` 是飞行接近点相对落地目标的高度；它和最终到达范围、落地触发距离分别配置。
+
+`TravelObservation.CanFly` 表示当前地图已允许飞行，使用实际运行时的 `PlayerState.CanFly`，不要传要求已骑乘的 `Control.CanFly`。后者只由起飞适配器核验。角色/区域变更先于任何完成路径的释放；host在登出、加载、依赖失效、死亡、业务取消时调用 Framework 上的 `Cancel`。UI只调用 `RequestCancel`，不得从UI读写原生或Hook。宿主业务不活跃时仍需完成已请求的Framework清理。
+
+`WaypointTravelBackend.Pump` 仅在同一 Framework tick、完成生命周期/取消判断后调用。`TravelJourney` 自动泵送；直接使用兼容的 `NavigationTravelSession` 时宿主自行泵送。纯算路任务不会移动，任务 continuation 只观察异常。默认查询30秒、起点偏移3码，路径长度可限制。
+
+`NavigationTravelSession` 保留为较低层的兼容入口；原 `NavigationTravelFrame.Arrived` 仅供尚有特殊业务终点条件的调用者。新的一般前往不要在宿主重新写一套状态机。纯战斗位移/护送/采集物交互的业务抢占条件仍由宿主保留。
+
+## 路径归属与 vnavmesh
+
+FN 优先使用可选的 `vnavmesh.Path.MoveToOwned(Guid,List<Vector3>,bool)`、`Path.IsRunningOwned(Guid)`、`Path.StopOwned(Guid)`。每次执行生成新令牌；停止只影响同一令牌，owned 路线卡住不会触发 vnavmesh 的 SimpleMove 自动重试。配套实现位于同级 `ffxiv_navmesh` 的 FollowPath/IPCProvider；这不是要求修改全局 StopOnStuck/RetryOnStuck 配置。
+
+旧版 vnavmesh 仍可使用原有 `Path.MoveTo/Stop`。旧 IPC 没有跨插件所有权标识，而且它的 RetryOnStuck 可能自行重算；因此旧版只能做到 FN 自身纯算路取消，不保证所有跨插件接管场景的严格停止隔离。配套 vnavmesh 源码已生成 Debug，未在游戏安装/启用新接口；不要把本地编译视为游戏已具备该能力。
+
+## 固定同一版本
+
+四个宿主都只引用本仓库固定提交。宿主根目录 `field-navigation.version` 记录已审阅的提交，项目导入 `FieldNavigation.targets`；构建时拒绝不同 HEAD 或已跟踪导航源码的未提交修改。正常初始化用 `git submodule update --init --recursive`，不要用 `--remote` 自动追最新分支。
+
+修改通用逻辑时，在独立 FieldNavigation 仓库的功能分支修改并提交，然后四个宿主同时更新 submodule 指针和 `field-navigation.version`。不得在某个宿主子模块内维护私有副本。先发布/推送共享提交，再推送引用它的宿主；本次只做本地整合，尚未推送。
+
+## 验证边界
+
+四宿主正常构建；MG的导航相关测试覆盖到达、取消迟到结果、错误高度、预算、恢复及旧接口。AF/AZ按项目约定不运行测试。所有原生动作、真实地图路线、阻挡下降、飞行条件及插件接管仍需游戏内验证，编译与离线测试不代表实机通过。

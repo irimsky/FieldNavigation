@@ -3,6 +3,8 @@ using System.Numerics;
 
 namespace FieldNavigation;
 
+public enum TravelLandingStrategy { ExactPoint, AroundTarget }
+
 public enum TravelJourneyState { Idle, Preparing, Travelling, Landing, Dismounting, FinalApproach, Settling, Arrived, Failed, Cancelled }
 
 /// <summary>One business travel operation. Internal replans share the original operation budget.</summary>
@@ -20,6 +22,8 @@ public sealed record TravelRequest
     public Vector3? RequiredArrivalPoint { get; init; }
     public float RequiredArrivalPointRadius { get; init; } = 1;
     public float LandingRadius { get; init; } = 5;
+    public TravelLandingStrategy LandingStrategy { get; init; }
+    public float LandingRecoveryRadius { get; init; } = 4;
     public float FlightHeight { get; init; } = 4;
     public float PathArrivalRadius { get; init; } = .5f;
     public bool DirectGroundApproach { get; init; }
@@ -49,6 +53,8 @@ public sealed class TravelJourney : IDisposable
     private readonly ITravelMovementControl movement;
     private readonly NavigationTravelSession travel;
     private readonly LandingSession landing;
+    private readonly CombatLandingSession alternativeLanding;
+    private bool alternativeLandingStarted;
     private readonly NoFlyTravelPolicy noFly = new();
     private TravelRequest? request;
     private Vector3 target, approach, routeTarget;
@@ -71,6 +77,7 @@ public sealed class TravelJourney : IDisposable
         this.backend = backend; this.movement = movement;
         this.travel = new(backend, descent, movement, this.clock);
         this.landing = new(backend, descent);
+        this.alternativeLanding = new(backend, descent);
     }
 
     public void Start(TravelRequest request, TravelObservation observation)
@@ -102,7 +109,7 @@ public sealed class TravelJourney : IDisposable
 
     private void Plan(TravelObservation frame)
     {
-        this.travel.Cancel(); this.landing.Reset(); this.movement.ResetTakeoff();
+        this.travel.Cancel(); this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff();
         this.routeStarted = false; this.settled = null;
         this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
@@ -121,6 +128,7 @@ public sealed class TravelJourney : IDisposable
             || frame.Character != this.character || frame.Territory != this.territory)
             return this.Fail("目标、角色或区域已失效");
         if (this.clock.GetElapsedTime(this.started) >= this.request.OperationTimeout) return this.Fail("本次前往总时间预算已耗尽");
+        if (frame.TargetPosition is { } supplied && !TravelGeometry.IsFinite(supplied)) return this.Fail("目标坐标无效");
         if (frame.TargetPosition is { } fresh && Vector3.DistanceSquared(fresh, this.target) > 1)
         {
             if (!TravelGeometry.IsFinite(fresh) || ++this.replans > this.request.MaximumReplans) return this.Fail("目标持续移动，重新规划次数已耗尽");
@@ -155,7 +163,17 @@ public sealed class TravelJourney : IDisposable
         if (this.State == TravelJourneyState.Landing)
         {
             if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.LandingTimeout) return this.Fail("落地时间预算已耗尽");
-            if (this.landing.Update(frame.Now, frame.Position, frame.Flight, landingPoint) != LandingStatus.Landed)
+            if (this.request.LandingStrategy == TravelLandingStrategy.AroundTarget)
+            {
+                if (!this.alternativeLandingStarted)
+                { this.alternativeLanding.Start(frame.Now, frame.Position, this.target, this.request.LandingRecoveryRadius); this.alternativeLandingStarted = true; }
+                var attempt = this.alternativeLanding.Tick(frame.Now, frame.Position, frame.Flight.InFlight, frame.InsideNoFly);
+                if (attempt.State == CombatLandingState.Failed) return this.Fail(attempt.Reason);
+                if (attempt.State != CombatLandingState.Landed)
+                { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, attempt.Reason); }
+            }
+            if (this.landing.Update(frame.Now, frame.Position, frame.Flight,
+                    this.request.LandingStrategy == TravelLandingStrategy.ExactPoint ? landingPoint : null) != LandingStatus.Landed)
             { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, "正在落地并等待稳定"); }
             this.landing.Reset();
             this.Change(TravelJourneyState.Dismounting, "落地已稳定");
@@ -220,6 +238,8 @@ public sealed class TravelJourney : IDisposable
             this.movement.TryTakeoff(frame.Now); return this.Update(NavigationTravelOutcome.Progress, "等待实际起飞");
         }
         if (this.State == TravelJourneyState.Preparing) this.Change(TravelJourneyState.Travelling, "正在前往目标");
+        if (this.selected == TravelMovementMode.Foot && this.request.DirectGroundApproach && !frame.Flight.InFlight)
+        { this.State = TravelJourneyState.FinalApproach; return this.Navigate(frame, this.approach, false, true); }
         Vector3 route = fly ? landingPoint + Vector3.UnitY * this.request.FlightHeight : this.approach;
         return this.Navigate(frame, route, fly, false);
     }
@@ -274,7 +294,7 @@ public sealed class TravelJourney : IDisposable
     public void Cancel()
     {
         try { this.travel.Cancel(); }
-        finally { this.landing.Reset(); this.movement.ResetTakeoff(); }
+        finally { this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff(); }
         if (this.ownsMount) this.movement.CancelMountCast();
         this.ownsMount = false; this.routeStarted = false; this.settled = null;
         this.State = TravelJourneyState.Cancelled;
