@@ -15,5 +15,11 @@
            Text="FieldNavigation revision mismatch: expected $(_ExpectedFieldNavigationRevision), found $(_ActualFieldNavigationRevision). Update the shared repository and all consumer pins together." />
     <Exec Command="git -C &quot;$(FieldNavigationSourcePath)&quot; diff --quiet HEAD -- &quot;*.cs&quot; &quot;*.targets&quot;"
           CustomErrorRegularExpression="^$" />
+    <Exec Command="git -C &quot;$(FieldNavigationSourcePath)&quot; ls-files --others --exclude-standard -- &quot;*.cs&quot; &quot;*.targets&quot;"
+          ConsoleToMSBuild="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_UntrackedFieldNavigationSource" />
+    </Exec>
+    <Error Condition="'$(_UntrackedFieldNavigationSource)' != ''"
+           Text="Untracked FieldNavigation source would create a private variant: $(_UntrackedFieldNavigationSource). Put shared changes in the central repository and update all pins." />
   </Target>
 </Project>
