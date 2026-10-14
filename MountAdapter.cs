@@ -16,6 +16,7 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
     private const uint DismountActionId = 23;
     private readonly MountRequestGate mountRequests = new();
     private DateTime nextDismountAt;
+    private ulong? mountCastOwner;
 
     public bool IsMounted => condition[ConditionFlag.Mounted] || condition[ConditionFlag.RidingPillion];
 
@@ -80,6 +81,7 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
             targets->SoftTarget = null;
         }
 
+        this.mountCastOwner = objectTable.LocalPlayer?.GameObjectId;
         onRequest?.Invoke();
         return manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
     }
@@ -88,7 +90,7 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
     public void CancelMountCast()
     {
         var player = objectTable.LocalPlayer;
-        if (player is not { IsCasting: true } || !(player.CastActionType == (byte)ActionType.Mount
+        if (player is not { IsCasting: true } || player.GameObjectId != this.mountCastOwner || !(player.CastActionType == (byte)ActionType.Mount
             || player.CastActionType == (byte)ActionType.GeneralAction && player.CastActionId == 9))
             return;
         var ui = FFXIVClientStructs.FFXIV.Client.Game.UI.UIState.Instance();

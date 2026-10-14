@@ -8,9 +8,13 @@ namespace FieldNavigation;
 /// Typed, cancellable path calculation and explicit waypoint execution. This preserves a
 /// host's arrival, flight, target, and ownership rules without using SimpleMove's late execution.
 /// </summary>
-public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
+public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWaypointNavigationBackend
 {
     private readonly IDalamudPluginInterface plugins;
+    private readonly ICallGateSubscriber<Guid, List<Vector3>, bool, bool> moveOwned;
+    private readonly ICallGateSubscriber<Guid, bool> runningOwned;
+    private readonly ICallGateSubscriber<Guid, bool> stopOwned;
+    private Guid? owner;
     private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> pointOnFloor;
     private readonly ICallGateSubscriber<bool> ready;
     private readonly ICallGateSubscriber<bool> running;
@@ -25,6 +29,9 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
     public VnavmeshWaypointIpc(IDalamudPluginInterface plugins)
     {
         this.plugins = plugins;
+        this.moveOwned = plugins.GetIpcSubscriber<Guid, List<Vector3>, bool, bool>("vnavmesh.Path.MoveToOwned");
+        this.runningOwned = plugins.GetIpcSubscriber<Guid, bool>("vnavmesh.Path.IsRunningOwned");
+        this.stopOwned = plugins.GetIpcSubscriber<Guid, bool>("vnavmesh.Path.StopOwned");
         this.pointOnFloor = plugins.GetIpcSubscriber<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor");
         this.ready = plugins.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
         this.running = plugins.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
@@ -38,6 +45,8 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
         this.nearest = plugins.GetIpcSubscriber<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPointReachable");
     }
 
+    public bool SupportsOwnedPaths => this.moveOwned.HasFunction && this.runningOwned.HasFunction && this.stopOwned.HasFunction;
+    public bool IsOwnedPathRunning => this.owner is { } id && this.runningOwned.HasFunction && this.runningOwned.InvokeFunc(id);
     public bool IsLoaded => this.plugins.InstalledPlugins.Any(p => p.InternalName == "vnavmesh" && p.IsLoaded)
         && this.ready.HasFunction && this.running.HasFunction && this.calculating.HasFunction
         && this.simpleCalculating.HasFunction && this.movementAllowed.HasFunction && this.findPath.HasFunction
@@ -64,7 +73,14 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
         if (!this.IsLoaded || !this.MovementAllowed || this.IsBusy)
             throw new InvalidOperationException("Navigation backend is unavailable, busy, or movement is disabled.");
         // Deliberately does not require a mesh: a host may supply a direct ground waypoint.
-        this.movePath.InvokeAction(waypoints.ToList(), fly);
+        if (this.SupportsOwnedPaths)
+        {
+            Guid token = Guid.NewGuid();
+            this.owner = token;
+            if (!this.moveOwned.InvokeFunc(token, waypoints.ToList(), fly))
+            { this.owner = null; throw new InvalidOperationException("所属路径请求被拒绝。"); }
+        }
+        else { this.owner = null; this.movePath.InvokeAction(waypoints.ToList(), fly); }
     }
 
     // Raw IPC cannot own a pending request; use WaypointTravelBackend.
@@ -140,7 +156,16 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend
         catch (Exception ex) { failure = ex.Message; }
         return false;
     }
-    public void StopPath() { if (this.stop.HasAction) this.stop.InvokeAction(); }
+    public void StopPath()
+    {
+        if (this.owner is { } token)
+        {
+            // Never fall back to a global stop if an owned IPC disappears during a reload.
+            if (this.stopOwned.HasFunction) this.stopOwned.InvokeFunc(token);
+            this.owner = null;
+        }
+        else if (this.stop.HasAction) this.stop.InvokeAction();
+    }
     public void Stop() => this.StopPath();
     private static bool Finite(Vector3 position) => float.IsFinite(position.X) && float.IsFinite(position.Y) && float.IsFinite(position.Z);
 }

@@ -4,8 +4,9 @@ using System.Diagnostics;
 namespace FieldNavigation;
 
 /// <summary>Framework-owned calculation-only requests followed by explicit path execution.</summary>
-public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Func<Vector3?> position) : INavigationBackend, INavigationPump
+public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Func<Vector3?> position, TimeProvider? timeProvider = null) : INavigationBackend, INavigationPump
 {
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private CancellationTokenSource? cancellation;
     private Task<List<Vector3>>? query;
     private long queryStarted;
@@ -18,7 +19,8 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     public string LastFailure { get; private set; } = "";
     public bool IsAvailable => backend.IsLoaded && (this.DirectGround || backend.IsReady);
     public bool IsMoveInProgress => this.query is not null;
-    public bool IsPathRunning => this.ownsPath && backend.IsPathRunning;
+    public bool IsPathRunning => this.ownsPath && (backend is IOwnedWaypointNavigationBackend { SupportsOwnedPaths: true } owned
+        ? owned.IsOwnedPathRunning : backend.IsPathRunning);
     public bool IsMoveActive => this.IsMoveInProgress || this.IsPathRunning;
 
     public bool MoveTo(Vector3 destination, bool fly)
@@ -36,7 +38,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
         }
         else
         {
-            this.cancellation = new(); this.queryStarted = Stopwatch.GetTimestamp();
+            this.cancellation = new(); this.queryStarted = this.clock.GetTimestamp();
             try { this.query = backend.FindPath(origin, destination, fly, this.cancellation.Token); }
             catch { this.ReleaseQuery(); throw; }
         }
@@ -46,9 +48,13 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     /// <summary>Call after identity/zone/stop checks; no task continuation starts movement.</summary>
     public void Pump(bool movementReady)
     {
-        if (this.ownsPath && !backend.IsPathRunning) this.ownsPath = false;
+        if (this.ownsPath && !this.IsPathRunning)
+        {
+            this.ownsPath = false;
+            if (backend.IsPathRunning) throw new InvalidOperationException("导航移动已由其他调用者接管。");
+        }
         if (this.query is not { } pending) return;
-        if (Stopwatch.GetElapsedTime(this.queryStarted) >= this.QueryTimeout)
+        if (this.clock.GetElapsedTime(this.queryStarted) >= this.QueryTimeout)
         { this.LastFailure = "路径计算超时"; this.ReleaseQuery(); return; }
         if (!pending.IsCompleted) return;
         if (!pending.IsCompletedSuccessfully)

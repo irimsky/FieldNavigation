@@ -17,3 +17,10 @@ public interface IWaypointNavigationBackend : INavigationBackend
     // Unlike best-effort Stop(), reports IPC failures to the host's cleanup policy.
     void StopPath();
 }
+
+/// <summary>Optional owner-token IPC, required for strict stop ownership across different plugins.</summary>
+public interface IOwnedWaypointNavigationBackend
+{
+    bool SupportsOwnedPaths { get; }
+    bool IsOwnedPathRunning { get; }
+}

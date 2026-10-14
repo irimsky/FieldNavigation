@@ -124,6 +124,7 @@ public sealed class NavigationTravelSession : IDisposable
     private readonly NavigationSession<TravelPurpose> navigation;
     private readonly LandingSession landing;
     private readonly ITravelRecoveryControl? recovery;
+    private readonly TimeProvider clock;
     private readonly NoFlyTravelPolicy noFly = new();
 
     private NavigationTravelOptions options = new();
@@ -148,8 +149,9 @@ public sealed class NavigationTravelSession : IDisposable
     public NavigationTravelSession(
         INavigationBackend backend,
         IDescentControl descent,
-        ITravelRecoveryControl? recovery = null)
+        ITravelRecoveryControl? recovery = null, TimeProvider? clock = null)
     {
+        this.clock = clock ?? TimeProvider.System;
         this.navigation = new NavigationSession<TravelPurpose>(backend);
         this.landing = new LandingSession(backend, descent);
         this.recovery = recovery;
@@ -186,7 +188,7 @@ public sealed class NavigationTravelSession : IDisposable
         if (options.OperationTimeout <= TimeSpan.Zero || options.RejectionTimeout <= TimeSpan.Zero
             || options.JumpTimeout <= TimeSpan.Zero || options.LandingTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
-        this.operationStarted = Stopwatch.GetTimestamp();
+        this.operationStarted = this.clock.GetTimestamp();
         this.rejectionStarted = null;
         this.landing.InteriorOffset = options.LandingInteriorOffset;
         this.initialIntent = options.InitialIntent;
@@ -233,9 +235,9 @@ public sealed class NavigationTravelSession : IDisposable
             return this.Update(NavigationTravelOutcome.Cancelled, NavigationRequestResult.NotDue,
                 NavigationRejection.None, LandingStatus.Descending, "导航已取消");
 
-        if (Stopwatch.GetElapsedTime(this.operationStarted) >= this.options.OperationTimeout)
+        if (this.clock.GetElapsedTime(this.operationStarted) >= this.options.OperationTimeout)
             return this.Fail(NavigationFailureStage.OperationTimeout, "导航总时间预算已耗尽");
-        if (this.rejectionStarted is { } rejected && Stopwatch.GetElapsedTime(rejected) >= this.options.RejectionTimeout)
+        if (this.rejectionStarted is { } rejected && this.clock.GetElapsedTime(rejected) >= this.options.RejectionTimeout)
             return this.Fail(NavigationFailureStage.BackendRejected, "导航请求持续被拒绝，已停止重试");
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.options.LandingApproach,
             this.state == NavigationTravelState.Landing);
@@ -346,7 +348,7 @@ public sealed class NavigationTravelSession : IDisposable
             this.options.GroundKind,
             groundAllowed: !frame.Flight.InFlight,
             this.options.HorizontalProgress);
-        if (request == NavigationRequestResult.Rejected) this.rejectionStarted ??= Stopwatch.GetTimestamp();
+        if (request == NavigationRequestResult.Rejected) this.rejectionStarted ??= this.clock.GetTimestamp();
         else if (request == NavigationRequestResult.Accepted) this.rejectionStarted = null;
         return request switch
         {
@@ -447,7 +449,7 @@ public sealed class NavigationTravelSession : IDisposable
 
     private NavigationTravelUpdate TickJumpRecovery(NavigationTravelFrame frame)
     {
-        if (Stopwatch.GetElapsedTime(this.jumpStarted) >= this.options.JumpTimeout)
+        if (this.clock.GetElapsedTime(this.jumpStarted) >= this.options.JumpTimeout)
             return this.Fail(NavigationFailureStage.JumpRecovery, "跳跃恢复超时");
         if (frame.Flight.InFlight)
             return this.BeginLanding(frame, "跳跃恢复期间意外进入飞行，强制落地");
@@ -536,7 +538,7 @@ public sealed class NavigationTravelSession : IDisposable
         this.jumpAttempted = true;
         this.failureStage = NavigationFailureStage.JumpRecovery;
         this.state = NavigationTravelState.JumpRecovery;
-        this.jumpStarted = Stopwatch.GetTimestamp();
+        this.jumpStarted = this.clock.GetTimestamp();
         this.landingStartedAt = frame.Now;
         this.landing.Reset();
         this.navigation.Cancel();
