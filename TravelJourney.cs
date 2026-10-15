@@ -63,7 +63,7 @@ public sealed class TravelJourney : IDisposable
     private long started, phaseStarted;
     private long? settled;
     private Vector3 settleAnchor;
-    private bool routeStarted, ownsMount;
+    private bool routeStarted, ownsMount, preparingTakeoff;
     private int mountRequests, replans, cancelRequested;
     private ulong character;
     private uint territory;
@@ -113,7 +113,7 @@ public sealed class TravelJourney : IDisposable
     private void Plan(TravelObservation frame)
     {
         this.travel.Cancel(); this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff();
-        this.routeStarted = false; this.settled = null;
+        this.routeStarted = false; this.settled = null; this.preparingTakeoff = false;
         this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
@@ -230,7 +230,7 @@ public sealed class TravelJourney : IDisposable
         if (this.selected != TravelMovementMode.Foot && !frame.MountedReady && !frame.Flight.InFlight)
         {
             if (this.State == TravelJourneyState.Travelling)
-            { this.travel.Cancel(); this.routeStarted = false; this.movement.ResetTakeoff(); this.Change(TravelJourneyState.Preparing, "骑乘状态变化，重新准备"); }
+            { this.travel.Cancel(); this.routeStarted = false; this.movement.ResetTakeoff(); this.preparingTakeoff = false; this.Change(TravelJourneyState.Preparing, "骑乘状态变化，重新准备"); }
             if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("召唤坐骑超时");
             if (this.mountRequests < this.request.MaximumMountRequests)
                 this.movement.TryMount(() => { this.ownsMount = true; this.mountRequests++; });
@@ -239,9 +239,20 @@ public sealed class TravelJourney : IDisposable
         this.ownsMount = false;
         if (fly && !frame.Flight.InFlight)
         {
-            if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("起飞超时");
-            this.movement.TryTakeoff(frame.Now); return this.Update(NavigationTravelOutcome.Progress, "等待实际起飞");
+            if (!this.preparingTakeoff)
+            {
+                // A ground leg may have used most of the operation budget before leaving
+                // a no-fly zone. Stop that leg and give takeoff its own bounded phase.
+                this.travel.Cancel(); this.routeStarted = false;
+                this.movement.ResetTakeoff(); this.preparingTakeoff = true;
+                this.Change(TravelJourneyState.Preparing, "停止原路线，准备起飞");
+            }
+            if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
+                return this.Fail($"起飞超时：{this.movement.TakeoffStatus}");
+            this.movement.TryTakeoff(frame.Now);
+            return this.Update(NavigationTravelOutcome.Progress, $"等待实际起飞：{this.movement.TakeoffStatus}");
         }
+        this.preparingTakeoff = false;
         if (this.State == TravelJourneyState.Preparing) this.Change(TravelJourneyState.Travelling, "正在前往目标");
         if (this.selected == TravelMovementMode.Foot && this.request.DirectGroundApproach && !frame.Flight.InFlight)
         { this.State = TravelJourneyState.FinalApproach; return this.Navigate(frame, this.approach, false, true); }
@@ -302,7 +313,7 @@ public sealed class TravelJourney : IDisposable
         try { this.travel.Cancel(); }
         finally { this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff(); }
         if (this.ownsMount) this.movement.CancelMountCast();
-        this.ownsMount = false; this.routeStarted = false; this.settled = null;
+        this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false;
         this.State = TravelJourneyState.Cancelled;
         this.reason = "导航已取消";
     }
