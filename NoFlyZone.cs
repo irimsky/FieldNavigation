@@ -66,9 +66,10 @@ public sealed class NoFlyZoneCatalog(
         // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.4, 20.9)。
         new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
             "试验矩形禁飞区·南萨纳兰", new Vector2(27.4f, 20.9f)),
-        // 叹息海 (16.7, 16.3) 到 (26.9, 5.8)：从区域外飞入区域内时不触发禁飞规则。
+        // 叹息海 (16.7, 16.3) 到 (26.9, 5.8)：外到内、内到内路线不触发禁飞规则。
         new(959, new Vector2(16.7f, 16.3f), new Vector2(26.9f, 5.8f),
-            "矩形禁飞区·叹息海", SpecialRules: NoFlyRouteRule.OutsideToInside),
+            "矩形禁飞区·叹息海",
+            SpecialRules: NoFlyRouteRule.OutsideToInside | NoFlyRouteRule.InsideToInside),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
