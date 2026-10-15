@@ -80,6 +80,7 @@ public sealed class TravelJourney : IDisposable
     public Vector3? ApproachPoint => this.request is null ? null : this.approach;
     public bool IntermediateWaypointPending => this.request?.IntermediateWaypoint is not null && !this.intermediateReached
         && this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling;
+    public bool IntermediateWaypointReached => this.intermediateReached;
 
     public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement, TimeProvider? clock = null)
     {

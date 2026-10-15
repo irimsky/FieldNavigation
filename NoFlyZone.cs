@@ -50,13 +50,14 @@ public readonly record struct NoFlyMapRectangle(
     Vector2? LandingMapCoordinate = null,
     NoFlyRouteRule SpecialRules = NoFlyRouteRule.None);
 
-/// <summary>A map rectangle whose outward flight must pass through a fixed airborne waypoint.</summary>
+/// <summary>A map rectangle whose configured boundary crossings must pass through a fixed airborne waypoint.</summary>
 public readonly record struct FlightExitZone(
     uint TerritoryId,
     Vector2 FirstMapCoordinate,
     Vector2 SecondMapCoordinate,
     Vector2 ExitWaypointMapCoordinate,
-    string Name);
+    string Name,
+    NoFlyRouteRule Routes = NoFlyRouteRule.InsideToOutside);
 
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
@@ -78,9 +79,10 @@ public sealed class NoFlyZoneCatalog(
     };
     private static readonly FlightExitZone[] defaultFlightExitZones =
     {
-        // 叹息海离区中转：从矩形内飞往矩形外时，先经过地图坐标 (21.8, 18.5)。
+        // 叹息海进出中转：内到外及外到内均先经过地图坐标 (21.8, 18.5)。
         new(959, new Vector2(4.2f, 17.5f), new Vector2(39.2f, 4.1f),
-            new Vector2(21.8f, 18.5f), "飞行离区中转·叹息海"),
+            new Vector2(21.8f, 18.5f), "飞行进出中转·叹息海",
+            NoFlyRouteRule.InsideToOutside | NoFlyRouteRule.OutsideToInside),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
@@ -136,7 +138,10 @@ public sealed class NoFlyZoneCatalog(
             Vector3 max = Vector3.Max(first, second);
             bool originInside = origin.X >= min.X && origin.X <= max.X && origin.Z >= min.Z && origin.Z <= max.Z;
             bool destinationInside = destination.X >= min.X && destination.X <= max.X && destination.Z >= min.Z && destination.Z <= max.Z;
-            if (originInside && !destinationInside)
+            NoFlyRouteRule route = originInside
+                ? destinationInside ? NoFlyRouteRule.InsideToInside : NoFlyRouteRule.InsideToOutside
+                : destinationInside ? NoFlyRouteRule.OutsideToInside : NoFlyRouteRule.None;
+            if (route != NoFlyRouteRule.None && (zone.Routes & route) != 0)
                 return ConvertMapCoordinate(mapRow, zone.ExitWaypointMapCoordinate);
         }
         return null;

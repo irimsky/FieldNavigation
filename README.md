@@ -45,9 +45,9 @@ var update = journey.Tick(observation);
 
 禁飞区可在 `NoFlyMapRectangle.SpecialRules` 中声明路线豁免：`InsideToInside`、`InsideToOutside`、`OutsideToInside` 可以任意组合。没有声明时沿用默认禁飞行为。宿主在创建路线时调用 `NoFlyZoneCatalog.IsRouteExempt`，把结果放入 `TravelObservation.NoFlyExempt`；FN 会在整条路线中保持该起点/终点判定，避免跨过边界后重新分类。
 
-`FlightExitZone` 是独立于禁飞区的地图范围：当路线起点位于范围内、终点位于范围外时，宿主把 `FindFlightExitWaypoint` 返回的水平世界坐标写入 `TravelRequest.IntermediateWaypoint`，并设置 `IntermediateWaypointIsMapCoordinate = true`。FN 查询地面高度，取地面上方至少4码与当前高度的较高者作为飞行高度，保留指定X/Z。实际飞到中转点3码内（`IntermediateWaypointRadius`）后才继续原目标；途中经过原目标不能提前落地或完成。两段共用可取消旅程和总时间预算，中转停滞或飞行条件失效时返回失败，交给宿主恢复，不降级为直接前往原目标。其他方向和范围内目标不增加中转；宿主禁用飞行时不传中转点。
+`FlightExitZone` 是独立于禁飞区的地图范围：`Routes` 位掩码按 `InsideToOutside`、`OutsideToInside` 声明需要中转的穿越方向，默认只处理内到外。命中方向的路线，宿主把 `FindFlightExitWaypoint` 返回的水平世界坐标写入 `TravelRequest.IntermediateWaypoint`，并设置 `IntermediateWaypointIsMapCoordinate = true`。FN 查询地面高度，取地面上方至少4码与当前高度的较高者作为飞行高度，保留指定X/Z。实际飞到中转点3码内（`IntermediateWaypointRadius`）后才继续原目标；途中经过原目标不能提前落地或完成。两段共用可取消旅程和总时间预算，中转停滞或飞行条件失效时返回失败，交给宿主恢复，不降级为直接前往原目标。其他方向和范围内目标不增加中转；宿主禁用飞行时不传中转点。
 
-当前叹息海（Territory 959）配置 `(4.2, 17.5)`—`(39.2, 4.1)`，出口 `(21.8, 18.5)`；原东西两块禁飞矩形已移除。宿主在远行切换局部落点搜索前检查 `TravelJourney.IntermediateWaypointPending`，保证中转完成前不取消该旅程。
+当前叹息海（Territory 959）配置 `(4.2, 17.5)`—`(39.2, 4.1)`，出口 `(21.8, 18.5)`，内到外和外到内都要求先经出口；原东西两块禁飞矩形已移除。宿主在远行切换局部落点搜索前检查 `TravelJourney.IntermediateWaypointPending`，并在同一 FATE 内用 `TravelJourney.IntermediateWaypointReached` 记录已通过中转，保证中转完成前不取消该旅程、通过后也不再重复中转。
 
 `AreaLandingPlanner.Update` 可传入 `Func<Vector3, bool>`，按每个已解析的候选地面选择预查的飞行/地面模式。宿主应与后续 `TravelRequest.Movement` 使用同一策略，并按该候选的起点/终点判断禁飞豁免，避免仅凭当前位于禁飞区就把空中起点交给地面寻路。待查模式改变时取消查询并重试该候选，保留原搜索预算；原固定 `bool` 入口继续兼容。
 
