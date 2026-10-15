@@ -24,6 +24,11 @@ public sealed class AreaLandingPlanner(INavigationBackend navigation,
     public string Status { get; private set; } = string.Empty;
 
     public Vector3? Update(DateTime now, ulong operationId, Vector3 center, float radius, Vector3 origin, bool fly, IEnumerable<Vector3> targetPositions)
+        => this.Update(now, operationId, center, radius, origin, _ => fly, targetPositions);
+
+    /// <summary>Selects the query mode for each resolved floor, including route-specific no-fly exemptions.</summary>
+    public Vector3? Update(DateTime now, ulong operationId, Vector3 center, float radius, Vector3 origin,
+        Func<Vector3, bool> flyToFloor, IEnumerable<Vector3> targetPositions)
     {
         if (this.operationId != operationId)
         {
@@ -72,13 +77,22 @@ public sealed class AreaLandingPlanner(INavigationBackend navigation,
 
         if (this.path is { } query)
         {
+            bool fly = flyToFloor(this.pendingFloor);
+            if (this.pendingFlight != fly)
+            {
+                // A mode change invalidates the query, not the candidate. Retry it under
+                // the current movement policy without consuming another destination.
+                this.CancelQuery(retry: true);
+                this.Status = "移动方式变化，重新检查候选落点路径";
+                return null;
+            }
             if (!query.IsCompleted && now - this.queryStartedAt < TimeSpan.FromSeconds(5))
             {
                 this.Status = "正在异步检查候选落点路径";
                 return null;
             }
             bool usable = false;
-            if (query.IsCompletedSuccessfully && this.pendingFlight == fly)
+            if (query.IsCompletedSuccessfully)
             {
                 List<Vector3> points = query.GetAwaiter().GetResult();
                 Vector3 endpoint = Approach(this.pendingFloor, fly);
@@ -113,9 +127,10 @@ public sealed class AreaLandingPlanner(INavigationBackend navigation,
             return null;
         }
 
+        bool candidateFlight = flyToFloor(floor);
         this.pendingFloor = floor;
-        this.pendingFlight = fly;
-        if (Vector3.DistanceSquared(origin, Approach(floor, fly)) <= 9f)
+        this.pendingFlight = candidateFlight;
+        if (Vector3.DistanceSquared(origin, Approach(floor, candidateFlight)) <= 9f)
         {
             this.Floor = floor;
             this.Status = "当前位置已在候选落点接近范围内";
@@ -125,7 +140,7 @@ public sealed class AreaLandingPlanner(INavigationBackend navigation,
         this.cancellation = new CancellationTokenSource();
         try
         {
-            this.path = findPath(origin, Approach(floor, fly), fly, this.cancellation.Token);
+            this.path = findPath(origin, Approach(floor, candidateFlight), candidateFlight, this.cancellation.Token);
             // No continuation touches host/game state; observe faults even after Stop/unload.
             _ = this.path.ContinueWith(static failed => { _ = failed.Exception; },
                 CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);

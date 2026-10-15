@@ -44,6 +44,8 @@ var update = journey.Tick(observation);
 
 禁飞区可在 `NoFlyMapRectangle.SpecialRules` 中声明路线豁免：`InsideToInside`、`InsideToOutside`、`OutsideToInside` 可以任意组合。没有声明时沿用默认禁飞行为。宿主在创建路线时调用 `NoFlyZoneCatalog.IsRouteExempt`，把结果放入 `TravelObservation.NoFlyExempt`；FN 会在整条路线中保持该起点/终点判定，避免跨过边界后重新分类。
 
+`AreaLandingPlanner.Update` 可传入 `Func<Vector3, bool>`，按每个已解析的候选地面选择预查的飞行/地面模式。宿主应与后续 `TravelRequest.Movement` 使用同一策略，并按该候选的起点/终点判断禁飞豁免，避免仅凭当前位于禁飞区就把空中起点交给地面寻路。待查模式改变时取消查询并重试该候选，保留原搜索预算；原固定 `bool` 入口继续兼容。
+
 `WaypointTravelBackend.Pump` 仅在同一 Framework tick、完成生命周期/取消判断后调用。`TravelJourney` 自动泵送；直接使用兼容的 `NavigationTravelSession` 时宿主自行泵送。纯算路任务不会移动，任务 continuation 只观察异常。默认查询30秒、起点偏移3码，路径长度可限制。
 
 `NavigationTravelSession` 保留为较低层的兼容入口；原 `NavigationTravelFrame.Arrived` 仅供尚有特殊业务终点条件的调用者。新的一般前往不要在宿主重新写一套状态机。纯战斗位移/护送/采集物交互的业务抢占条件仍由宿主保留。
