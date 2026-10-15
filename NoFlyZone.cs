@@ -6,6 +6,15 @@ using Lumina.Excel.Sheets;
 
 namespace FieldNavigation;
 
+[Flags]
+public enum NoFlyRouteRule
+{
+    None = 0,
+    InsideToInside = 1 << 0,
+    InsideToOutside = 1 << 1,
+    OutsideToInside = 1 << 2,
+}
+
 /// <summary>A map volume where travel must use ground navigation.</summary>
 /// <remarks>The optional landing point stores world X/Z with a placeholder Y; landing resolves its floor.</remarks>
 public readonly record struct NoFlyZone(
@@ -13,12 +22,23 @@ public readonly record struct NoFlyZone(
     Vector3 Center,
     Vector3 HalfExtents,
     string Name,
-    Vector3? LandingPoint = null)
+    Vector3? LandingPoint = null,
+    NoFlyRouteRule SpecialRules = NoFlyRouteRule.None)
 {
     public bool Contains(Vector3 position) =>
         MathF.Abs(position.X - this.Center.X) <= this.HalfExtents.X
         && MathF.Abs(position.Y - this.Center.Y) <= this.HalfExtents.Y
         && MathF.Abs(position.Z - this.Center.Z) <= this.HalfExtents.Z;
+
+    public bool IsRouteExempt(bool originInside, bool destinationInside)
+    {
+        if (!originInside && !destinationInside)
+            return false;
+        NoFlyRouteRule route = originInside
+            ? destinationInside ? NoFlyRouteRule.InsideToInside : NoFlyRouteRule.InsideToOutside
+            : NoFlyRouteRule.OutsideToInside;
+        return (this.SpecialRules & route) != 0;
+    }
 }
 
 /// <summary>A rectangular no-fly area defined by two in-game map coordinates (X, Y).</summary>
@@ -27,7 +47,8 @@ public readonly record struct NoFlyMapRectangle(
     Vector2 FirstMapCoordinate,
     Vector2 SecondMapCoordinate,
     string Name,
-    Vector2? LandingMapCoordinate = null);
+    Vector2? LandingMapCoordinate = null,
+    NoFlyRouteRule SpecialRules = NoFlyRouteRule.None);
 
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
@@ -45,6 +66,9 @@ public sealed class NoFlyZoneCatalog(
         // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.4, 20.9)。
         new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
             "试验矩形禁飞区·南萨纳兰", new Vector2(27.4f, 20.9f)),
+        // 叹息海 (16.7, 16.3) 到 (26.9, 5.8)：从区域外飞入区域内时不触发禁飞规则。
+        new(959, new Vector2(16.7f, 16.3f), new Vector2(26.9f, 5.8f),
+            "矩形禁飞区·叹息海", SpecialRules: NoFlyRouteRule.OutsideToInside),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
@@ -62,6 +86,24 @@ public sealed class NoFlyZoneCatalog(
         }
 
         return null;
+    }
+
+    /// <summary>Returns whether every no-fly zone touched by this route grants a special exemption.</summary>
+    public bool IsRouteExempt(uint territoryId, Vector3 origin, Vector3 destination)
+    {
+        bool matched = false;
+        foreach (NoFlyZone zone in this.Load(territoryId))
+        {
+            bool originInside = zone.Contains(origin);
+            bool destinationInside = zone.Contains(destination);
+            if (!originInside && !destinationInside)
+                continue;
+            matched = true;
+            if (!zone.IsRouteExempt(originInside, destinationInside))
+                return false;
+        }
+
+        return matched;
     }
 
     public IReadOnlyList<NoFlyZone> Load(uint territoryId)
@@ -118,7 +160,8 @@ public sealed class NoFlyZoneCatalog(
             new Vector3((min.X + max.X) * 0.5f, 0f, (min.Z + max.Z) * 0.5f),
             new Vector3((max.X - min.X) * 0.5f, float.MaxValue, (max.Z - min.Z) * 0.5f),
             rectangle.Name,
-            landingPoint);
+            landingPoint,
+            rectangle.SpecialRules);
     }
 
     public static Vector3 ConvertMapCoordinate(Map map, Vector2 coordinate) => new(

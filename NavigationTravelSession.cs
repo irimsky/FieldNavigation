@@ -74,6 +74,8 @@ public sealed class NavigationTravelOptions
     public TimeSpan RejectionTimeout { get; init; } = TimeSpan.FromSeconds(15);
     public TimeSpan JumpTimeout { get; init; } = TimeSpan.FromSeconds(5);
     public bool AllowFlightRecovery { get; init; } = true;
+    /// <summary>Ignore no-fly boundaries for this route because its origin/destination matches a zone exemption.</summary>
+    public bool NoFlyExempt { get; init; }
     /// <summary>Optional world point to approach before descending on no-fly entry.</summary>
     public Vector3? NoFlyLandingPoint { get; init; }
     /// <summary>Short relocation of an already airborne character to a host-validated landing point.</summary>
@@ -202,7 +204,7 @@ public sealed class NavigationTravelSession : IDisposable
         this.forceGroundAfterLanding = false;
         this.completingAfterLanding = false;
         this.navigation.Progress.MinimumDisplacement = options.MinimumProgressDisplacement;
-        bool groundOnly = insideNoFly && !options.LandingApproach;
+        bool groundOnly = insideNoFly && !options.NoFlyExempt && !options.LandingApproach;
         this.noFly.Begin(now, groundOnly);
         this.mode = groundOnly ? NavigationTravelMode.Ground : ToMode(options.InitialIntent);
         this.groundReason = groundOnly
@@ -239,7 +241,7 @@ public sealed class NavigationTravelSession : IDisposable
             return this.Fail(NavigationFailureStage.OperationTimeout, "导航总时间预算已耗尽");
         if (this.rejectionStarted is { } rejected && this.clock.GetElapsedTime(rejected) >= this.options.RejectionTimeout)
             return this.Fail(NavigationFailureStage.BackendRejected, "导航请求持续被拒绝，已停止重试");
-        this.noFly.Update(frame.Now, frame.InsideNoFly && !this.options.LandingApproach,
+        this.noFly.Update(frame.Now, frame.InsideNoFly && !this.options.NoFlyExempt && !this.options.LandingApproach,
             this.state == NavigationTravelState.Landing);
         if (this.state == NavigationTravelState.Landing)
             return this.TickLanding(frame);
@@ -421,7 +423,7 @@ public sealed class NavigationTravelSession : IDisposable
             // Landing owns the boundary debounce while descent is active. Re-evaluate once
             // with landing=false after stability is confirmed so an already completed one-second
             // exit debounce can immediately restore the original flight intent on this tick.
-            this.noFly.Update(frame.Now, frame.InsideNoFly, landing: false);
+            this.noFly.Update(frame.Now, frame.InsideNoFly && !this.options.NoFlyExempt, landing: false);
             this.state = NavigationTravelState.Navigating;
             bool resumeFlight = this.initialIntent == NavigationTravelIntent.Fly
                 && this.IsNoFlyGroundReason()

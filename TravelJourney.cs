@@ -40,7 +40,8 @@ public sealed record TravelRequest
 public readonly record struct TravelObservation(DateTime Now, Vector3 Position, FlightState Flight,
     bool MountedReady, bool Dismounted, bool CanFly, bool InsideNoFly = false,
     Vector3? NoFlyLandingPoint = null, bool MovementReady = true, bool TargetValid = true,
-    Vector3? TargetPosition = null, ulong Character = 0, uint Territory = 0);
+    Vector3? TargetPosition = null, ulong Character = 0, uint Territory = 0,
+    bool NoFlyExempt = false);
 
 public readonly record struct TravelJourneyUpdate(TravelJourneyState State, NavigationTravelOutcome Outcome,
     TravelMovementMode Movement, string Reason);
@@ -66,6 +67,7 @@ public sealed class TravelJourney : IDisposable
     private int mountRequests, replans, cancelRequested;
     private ulong character;
     private uint territory;
+    private bool noFlyExempt;
     private string reason = "尚未开始";
     public TravelJourneyState State { get; private set; }
     public TravelMovementMode Movement => this.selected;
@@ -99,11 +101,12 @@ public sealed class TravelJourney : IDisposable
         this.Cancel();
         this.request = request;
         this.character = observation.Character; this.territory = observation.Territory;
+        this.noFlyExempt = observation.NoFlyExempt;
         this.started = this.clock.GetTimestamp();
         this.mountRequests = this.replans = 0;
         Volatile.Write(ref this.cancelRequested, 0);
         this.target = request.Destination;
-        this.noFly.Begin(observation.Now, observation.InsideNoFly);
+        this.noFly.Begin(observation.Now, observation.InsideNoFly && !this.noFlyExempt);
         this.Plan(observation);
     }
 
@@ -141,7 +144,8 @@ public sealed class TravelJourney : IDisposable
         if (!this.backend.IsAvailable) return this.Fail("导航后端不可用");
         if (!frame.MovementReady) { this.backend.Stop(); this.routeStarted = false; this.settled = null; return this.Update(NavigationTravelOutcome.Progress, "等待移动条件"); }
 
-        this.noFly.Update(frame.Now, frame.InsideNoFly, this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
+        this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
+            this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
         bool inRange = this.ContainsGoal(frame.Position);
         bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
         Vector3 landingPoint = this.request.LandingPoint ?? this.approach;
@@ -167,7 +171,8 @@ public sealed class TravelJourney : IDisposable
             {
                 if (!this.alternativeLandingStarted)
                 { this.alternativeLanding.Start(frame.Now, frame.Position, this.target, this.request.LandingRecoveryRadius); this.alternativeLandingStarted = true; }
-                var attempt = this.alternativeLanding.Tick(frame.Now, frame.Position, frame.Flight.InFlight, frame.InsideNoFly);
+                var attempt = this.alternativeLanding.Tick(frame.Now, frame.Position, frame.Flight.InFlight,
+                    frame.InsideNoFly && !this.noFlyExempt);
                 if (attempt.State == CombatLandingState.Failed) return this.Fail(attempt.Reason);
                 if (attempt.State != CombatLandingState.Landed)
                 { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, attempt.Reason); }
@@ -257,6 +262,7 @@ public sealed class TravelJourney : IDisposable
                 InitialIntent = fly ? NavigationTravelIntent.Fly : NavigationTravelIntent.Ground,
                 CompleteAtResolvedDestination = false, AllowFlightRecovery = false, StopOnStall = this.request!.StopOnStall,
                 NoFlyLandingPoint = frame.NoFlyLandingPoint, LandingTimeout = this.request!.LandingTimeout,
+                NoFlyExempt = this.noFlyExempt,
                 StallTimeout = this.request.StallTimeout, NoPathTimeout = this.request.NoPathTimeout,
                 OperationTimeout = this.request.OperationTimeout, MinimumProgressDisplacement = final ? .25f : 1.5f,
             });
@@ -264,7 +270,7 @@ public sealed class TravelJourney : IDisposable
         }
         bool arrived = Vector3.Distance(frame.Position, destination) <= this.request!.PathArrivalRadius;
         var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
-            arrived, frame.InsideNoFly, frame.Flight, frame.NoFlyLandingPoint));
+            arrived, frame.InsideNoFly && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
         if (result.Outcome == NavigationTravelOutcome.Failed) return this.Fail(result.Reason);
         if (result.Outcome == NavigationTravelOutcome.Arrived)
         {
