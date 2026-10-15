@@ -11,6 +11,11 @@ public enum TravelJourneyState { Idle, Preparing, Travelling, Landing, Dismounti
 public sealed record TravelRequest
 {
     public required Vector3 Destination { get; init; }
+    /// <summary>Required airborne checkpoint used before continuing to Destination.</summary>
+    public Vector3? IntermediateWaypoint { get; init; }
+    /// <summary>Resolve a horizontal map waypoint's floor and retain at least the current flight altitude.</summary>
+    public bool IntermediateWaypointIsMapCoordinate { get; init; }
+    public float IntermediateWaypointRadius { get; init; } = 3;
     public TravelModePolicy Movement { get; init; } = new();
     public TravelArrivalPolicy Arrival { get; init; } = new();
     public bool FindApproachPoint { get; init; }
@@ -63,15 +68,18 @@ public sealed class TravelJourney : IDisposable
     private long started, phaseStarted;
     private long? settled;
     private Vector3 settleAnchor;
-    private bool routeStarted, ownsMount, preparingTakeoff;
+    private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached;
     private int mountRequests, replans, cancelRequested;
     private ulong character;
     private uint territory;
     private bool noFlyExempt;
+    private Vector3? intermediateDestination;
     private string reason = "尚未开始";
     public TravelJourneyState State { get; private set; }
     public TravelMovementMode Movement => this.selected;
     public Vector3? ApproachPoint => this.request is null ? null : this.approach;
+    public bool IntermediateWaypointPending => this.request?.IntermediateWaypoint is not null && !this.intermediateReached
+        && this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling;
 
     public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement, TimeProvider? clock = null)
     {
@@ -85,7 +93,8 @@ public sealed class TravelJourney : IDisposable
     public void Start(TravelRequest request, TravelObservation observation)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!TravelGeometry.IsFinite(request.Destination) || request.LandingPoint is { } p && !TravelGeometry.IsFinite(p)
+        if (!TravelGeometry.IsFinite(request.Destination) || request.IntermediateWaypoint is { } waypoint && !TravelGeometry.IsFinite(waypoint)
+            || request.LandingPoint is { } p && !TravelGeometry.IsFinite(p)
             || request.ApproachPoint is { } a && !TravelGeometry.IsFinite(a)
             || request.RequiredArrivalPoint is { } end && !TravelGeometry.IsFinite(end)
             || !float.IsFinite(request.RequiredArrivalPointRadius) || request.RequiredArrivalPointRadius <= 0
@@ -94,6 +103,7 @@ public sealed class TravelJourney : IDisposable
             || !float.IsFinite(request.LandingRadius) || request.LandingRadius <= 0
             || !float.IsFinite(request.FlightHeight) || request.FlightHeight < 0
             || !float.IsFinite(request.PathArrivalRadius) || request.PathArrivalRadius <= 0
+            || !float.IsFinite(request.IntermediateWaypointRadius) || request.IntermediateWaypointRadius <= 0
             || request.OperationTimeout <= TimeSpan.Zero || request.PreparationTimeout <= TimeSpan.Zero
             || request.LandingTimeout <= TimeSpan.Zero || request.Arrival.SettleDuration < TimeSpan.Zero
             || request.MaximumMountRequests <= 0 || request.MaximumReplans < 0)
@@ -106,6 +116,7 @@ public sealed class TravelJourney : IDisposable
         this.mountRequests = this.replans = 0;
         Volatile.Write(ref this.cancelRequested, 0);
         this.target = request.Destination;
+        this.intermediateReached = false;
         this.noFly.Begin(observation.Now, observation.InsideNoFly && !this.noFlyExempt);
         this.Plan(observation);
     }
@@ -117,7 +128,8 @@ public sealed class TravelJourney : IDisposable
         this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
-        this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+        this.selected = this.request.IntermediateWaypoint is not null
+            ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
         this.Change(TravelJourneyState.Preparing, "准备前往目标");
     }
 
@@ -146,10 +158,32 @@ public sealed class TravelJourney : IDisposable
 
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
+        bool intermediate = this.IntermediateWaypointPending;
+        if (intermediate)
+        {
+            if (!frame.CanFly || this.noFly.GroundOnly) return this.Fail("离区中转要求飞行，但当前飞行条件不可用");
+            if (this.intermediateDestination is null)
+            {
+                Vector3 waypoint = this.request.IntermediateWaypoint!.Value;
+                if (this.request.IntermediateWaypointIsMapCoordinate)
+                {
+                    if (!this.backend.TryResolveTravelGroundDestination(waypoint, mapWaypoint: true, out var floor, out _)
+                        || !TravelGeometry.IsFinite(floor))
+                    {
+                        if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
+                            return this.Fail("无法解析离区中转点的地面高度");
+                        return this.Update(NavigationTravelOutcome.Progress, "等待解析离区中转点的地面高度");
+                    }
+                    // Keep the configured X/Z authoritative; floor queries may snap sideways.
+                    waypoint.Y = Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight));
+                }
+                this.intermediateDestination = waypoint;
+            }
+        }
         bool inRange = this.ContainsGoal(frame.Position);
         bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
         Vector3 landingPoint = this.request.LandingPoint ?? this.approach;
-        if (this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling)
+        if (!intermediate && this.State is (TravelJourneyState.Preparing or TravelJourneyState.Travelling))
         {
             if (frame.Flight.InFlight && needsLand
                 && TravelGeometry.HorizontalDistance(frame.Position, landingPoint) <= this.request.LandingRadius)
@@ -256,11 +290,12 @@ public sealed class TravelJourney : IDisposable
         if (this.State == TravelJourneyState.Preparing) this.Change(TravelJourneyState.Travelling, "正在前往目标");
         if (this.selected == TravelMovementMode.Foot && this.request.DirectGroundApproach && !frame.Flight.InFlight)
         { this.State = TravelJourneyState.FinalApproach; return this.Navigate(frame, this.approach, false, true); }
-        Vector3 route = fly ? landingPoint + Vector3.UnitY * this.request.FlightHeight : this.approach;
-        return this.Navigate(frame, route, fly, false);
+        Vector3 route = intermediate ? this.intermediateDestination!.Value
+            : fly ? landingPoint + Vector3.UnitY * this.request.FlightHeight : this.approach;
+        return this.Navigate(frame, route, fly, false, intermediate);
     }
 
-    private TravelJourneyUpdate Navigate(TravelObservation frame, Vector3 destination, bool fly, bool final)
+    private TravelJourneyUpdate Navigate(TravelObservation frame, Vector3 destination, bool fly, bool final, bool intermediate = false)
     {
         if (!this.routeStarted || Vector3.DistanceSquared(this.routeTarget, destination) > .01f)
         {
@@ -271,7 +306,7 @@ public sealed class TravelJourney : IDisposable
             {
                 GroundKind = this.request!.GroundKind,
                 InitialIntent = fly ? NavigationTravelIntent.Fly : NavigationTravelIntent.Ground,
-                CompleteAtResolvedDestination = false, AllowFlightRecovery = false, StopOnStall = this.request!.StopOnStall,
+                CompleteAtResolvedDestination = false, AllowFlightRecovery = false, StopOnStall = intermediate || this.request!.StopOnStall,
                 NoFlyLandingPoint = frame.NoFlyLandingPoint, LandingTimeout = this.request!.LandingTimeout,
                 NoFlyExempt = this.noFlyExempt,
                 StallTimeout = this.request.StallTimeout, NoPathTimeout = this.request.NoPathTimeout,
@@ -279,13 +314,22 @@ public sealed class TravelJourney : IDisposable
             });
             this.routeStarted = true;
         }
-        bool arrived = Vector3.Distance(frame.Position, destination) <= this.request!.PathArrivalRadius;
+        bool arrived = Vector3.Distance(frame.Position, destination) <= (intermediate
+            ? this.request!.IntermediateWaypointRadius : this.request!.PathArrivalRadius)
+            && (!intermediate || frame.Flight.InFlight);
         var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
             arrived, frame.InsideNoFly && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
         if (result.Outcome == NavigationTravelOutcome.Failed) return this.Fail(result.Reason);
         if (result.Outcome == NavigationTravelOutcome.Arrived)
         {
             this.routeStarted = false;
+            if (intermediate)
+            {
+                this.intermediateReached = true;
+                this.Change(TravelJourneyState.Travelling, "已到达离区中转点，继续前往原目标");
+                this.Pump(true);
+                return this.Update(NavigationTravelOutcome.Progress, this.reason);
+            }
             if (final && !this.ContainsGoal(frame.Position)) return this.Fail("路线结束但未满足实际目标范围");
             this.Change(fly && (this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted)
                 ? TravelJourneyState.Landing : TravelJourneyState.Dismounting, "路线结束，核验交接条件");
@@ -294,7 +338,8 @@ public sealed class TravelJourney : IDisposable
         return this.Update(NavigationTravelOutcome.Progress, result.Reason);
     }
 
-    private bool ContainsGoal(Vector3 position) => (this.request!.Arrival.Contains(position, this.target)
+    private bool ContainsGoal(Vector3 position) => (this.request!.IntermediateWaypoint is null || this.intermediateReached)
+        && (this.request.Arrival.Contains(position, this.target)
         || this.request.HorizontalArrivalOnGroundFallback
             && (this.selected != TravelMovementMode.Fly || this.routeStarted && this.travel.Mode == NavigationTravelMode.Ground)
             && TravelGeometry.HorizontalDistance(position, this.target) <= this.request.Arrival.Radius)
@@ -313,7 +358,8 @@ public sealed class TravelJourney : IDisposable
         try { this.travel.Cancel(); }
         finally { this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff(); }
         if (this.ownsMount) this.movement.CancelMountCast();
-        this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false;
+        this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
+        this.intermediateDestination = null;
         this.State = TravelJourneyState.Cancelled;
         this.reason = "导航已取消";
     }

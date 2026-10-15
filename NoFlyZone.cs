@@ -50,10 +50,19 @@ public readonly record struct NoFlyMapRectangle(
     Vector2? LandingMapCoordinate = null,
     NoFlyRouteRule SpecialRules = NoFlyRouteRule.None);
 
+/// <summary>A map rectangle whose outward flight must pass through a fixed airborne waypoint.</summary>
+public readonly record struct FlightExitZone(
+    uint TerritoryId,
+    Vector2 FirstMapCoordinate,
+    Vector2 SecondMapCoordinate,
+    Vector2 ExitWaypointMapCoordinate,
+    string Name);
+
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
     IEnumerable<uint>? placeNameIds = null,
-    IEnumerable<NoFlyMapRectangle>? mapRectangles = null)
+    IEnumerable<NoFlyMapRectangle>? mapRectangles = null,
+    IEnumerable<FlightExitZone>? flightExitZones = null)
 {
     // Only IDs are configured. Geometry is read from planmap.lgb at runtime.
     private static readonly uint[] defaultPlaceNameIds =
@@ -66,17 +75,18 @@ public sealed class NoFlyZoneCatalog(
         // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.4, 20.9)。
         new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
             "试验矩形禁飞区·南萨纳兰", new Vector2(27.4f, 20.9f)),
-        // 叹息海两个矩形：外到内、内到内路线不触发禁飞规则，内到外沿用禁飞规则。
-        new(959, new Vector2(5.4f, 16.7f), new Vector2(15.8f, 5.3f),
-            "矩形禁飞区·叹息海西部",
-            SpecialRules: NoFlyRouteRule.OutsideToInside | NoFlyRouteRule.InsideToInside),
-        new(959, new Vector2(27.2f, 17.4f), new Vector2(38.4f, 3.7f),
-            "矩形禁飞区·叹息海东部",
-            SpecialRules: NoFlyRouteRule.OutsideToInside | NoFlyRouteRule.InsideToInside),
+    };
+    private static readonly FlightExitZone[] defaultFlightExitZones =
+    {
+        // 叹息海离区中转：从矩形内飞往矩形外时，先经过地图坐标 (21.8, 18.5)。
+        new(959, new Vector2(4.2f, 17.5f), new Vector2(39.2f, 4.1f),
+            new Vector2(21.8f, 18.5f), "飞行离区中转·叹息海"),
     };
     private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
     private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
         (mapRectangles ?? defaultMapRectangles).ToArray();
+    private readonly IReadOnlyList<FlightExitZone> flightExitZones =
+        (flightExitZones ?? defaultFlightExitZones).ToArray();
     private readonly Dictionary<uint, IReadOnlyList<NoFlyZone>> cache = [];
 
     public NoFlyZone? Find(uint territoryId, Vector3 position)
@@ -110,6 +120,28 @@ public sealed class NoFlyZoneCatalog(
         return matched;
     }
 
+    public Vector3? FindFlightExitWaypoint(uint territoryId, Vector3 origin, Vector3 destination)
+    {
+        if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination)
+            || !this.flightExitZones.Any(zone => zone.TerritoryId == territoryId))
+            return null;
+        var map = this.GetMap(territoryId);
+        if (map is not { } mapRow || mapRow.SizeFactor == 0)
+            return null;
+        foreach (FlightExitZone zone in this.flightExitZones.Where(zone => zone.TerritoryId == territoryId))
+        {
+            Vector3 first = ConvertMapCoordinate(mapRow, zone.FirstMapCoordinate);
+            Vector3 second = ConvertMapCoordinate(mapRow, zone.SecondMapCoordinate);
+            Vector3 min = Vector3.Min(first, second);
+            Vector3 max = Vector3.Max(first, second);
+            bool originInside = origin.X >= min.X && origin.X <= max.X && origin.Z >= min.Z && origin.Z <= max.Z;
+            bool destinationInside = destination.X >= min.X && destination.X <= max.X && destination.Z >= min.Z && destination.Z <= max.Z;
+            if (originInside && !destinationInside)
+                return ConvertMapCoordinate(mapRow, zone.ExitWaypointMapCoordinate);
+        }
+        return null;
+    }
+
     public IReadOnlyList<NoFlyZone> Load(uint territoryId)
     {
         var territory = dataManager.GetExcelSheet<TerritoryType>()!.GetRowOrDefault(territoryId);
@@ -140,7 +172,7 @@ public sealed class NoFlyZoneCatalog(
             }
         }
 
-        var map = dataManager.GetExcelSheet<Map>()?.GetRowOrDefault(row.Map.RowId);
+        var map = this.GetMap(territoryId);
         if (map is { } mapRow && mapRow.SizeFactor != 0)
         {
             foreach (NoFlyMapRectangle rectangle in this.mapRectangles.Where(rectangle => rectangle.TerritoryId == territoryId))
@@ -148,6 +180,12 @@ public sealed class NoFlyZoneCatalog(
         }
 
         return zones;
+    }
+
+    private Map? GetMap(uint territoryId)
+    {
+        var territory = dataManager.GetExcelSheet<TerritoryType>()?.GetRowOrDefault(territoryId);
+        return territory is { } row ? dataManager.GetExcelSheet<Map>()?.GetRowOrDefault(row.Map.RowId) : null;
     }
 
     public static NoFlyZone CreateMapRectangleZone(NoFlyMapRectangle rectangle, Map map)
