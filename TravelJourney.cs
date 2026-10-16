@@ -76,6 +76,7 @@ public sealed class TravelJourney : IDisposable
     private Vector3? intermediateDestination;
     private string reason = "尚未开始";
     public TravelJourneyState State { get; private set; }
+    public bool IsMountPreparationActive => this.State == TravelJourneyState.Preparing && this.ownsMount;
     public TravelMovementMode Movement => this.selected;
     public NavigationFailureStage LastFailureStage { get; private set; }
     public Vector3? ApproachPoint => this.request is null ? null : this.approach;

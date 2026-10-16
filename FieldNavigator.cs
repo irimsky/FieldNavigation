@@ -158,8 +158,19 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         if (active!.TakeTarget() is { } fresh && Vector3.Distance(target, fresh) > 1)
         {
             if (++targetReplans > 64) { Finish(OperationStatus.Failed, OperationReason.BudgetExceeded, "移动目标重规划次数耗尽"); return; }
-            target = fresh; search?.Dispose(); search = null; rejected.Clear();
-            if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel(); journeyStarted = false; }
+            if (journeyStarted && journey.IsMountPreparationActive)
+            {
+                // A moving FATE marker must not cancel an already accepted mount cast.
+                // Keep the newest target queued and apply it after the cast completes.
+                active.UpdateTarget(fresh);
+                phase = "Preparing";
+                message = "等待坐骑读条完成后更新目标";
+            }
+            else
+            {
+                target = fresh; search?.Dispose(); search = null; rejected.Clear();
+                if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel(); journeyStarted = false; }
+            }
         }
         if (!frame.Travel.MovementReady)
         {

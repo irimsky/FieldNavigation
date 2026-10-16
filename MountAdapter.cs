@@ -41,6 +41,17 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         || condition[ConditionFlag.MountOrOrnamentTransition];
 
     public bool IsInFlight => condition[ConditionFlag.InFlight];
+    public bool IsMountCastActive
+    {
+        get
+        {
+            var player = objectTable.LocalPlayer;
+            return player is { IsCasting: true }
+                && player.GameObjectId == mountCastOwner
+                && (player.CastActionType == (byte)ActionType.Mount
+                    || player.CastActionType == (byte)ActionType.GeneralAction && player.CastActionId == MountRouletteActionId);
+        }
+    }
 
     public bool IsJumping => condition[ConditionFlag.Jumping] || condition[ConditionFlag.Jumping61];
 
@@ -50,8 +61,13 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         && !condition[ConditionFlag.Unconscious]
         && !condition[ConditionFlag.BetweenAreas]
         && !condition[ConditionFlag.BetweenAreas51]
+        && !condition[ConditionFlag.Occupied]
+        && !condition[ConditionFlag.OccupiedInEvent]
+        && !condition[ConditionFlag.OccupiedInQuestEvent]
         && !condition[ConditionFlag.OccupiedInCutSceneEvent]
         && !condition[ConditionFlag.Casting]
+        && !condition[ConditionFlag.Casting87]
+        && objectTable.LocalPlayer?.IsCasting != true
         && !this.IsJumping;
 
     public string MountBlockReason => this.IsMounted ? "游戏条件已显示正在骑乘"
@@ -60,8 +76,11 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         : condition[ConditionFlag.InCombat] ? "战斗中"
         : condition[ConditionFlag.Unconscious] ? "角色失去意识"
         : condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ? "区域切换中"
-        : condition[ConditionFlag.OccupiedInCutSceneEvent] ? "过场或事件占用中"
-        : condition[ConditionFlag.Casting] ? "施法中"
+        : condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent]
+            || condition[ConditionFlag.OccupiedInQuestEvent] || condition[ConditionFlag.OccupiedInCutSceneEvent]
+            ? "角色占用中"
+        : condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87] || objectTable.LocalPlayer?.IsCasting == true
+            ? "施法中"
         : this.IsJumping ? "跳跃中" : string.Empty;
 
     public bool TryMount() => this.TryMount(null);
