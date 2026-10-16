@@ -73,7 +73,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             || request.TotalTimeout <= TimeSpan.Zero || request.ResponseTimeout <= TimeSpan.Zero || request.SettleDuration < TimeSpan.Zero
             || !float.IsFinite(request.ArrivalRadius) || request.ArrivalRadius <= 0
             || request.ArrivalPosition is { } point && !TravelGeometry.IsFinite(point)) throw new ArgumentOutOfRangeException(nameof(request));
-        services.Log.Debug("[FN_TRACE] Transfer requested; kind={Kind}; destination={Destination}; territory={Territory}; force={Force}; arrival={Arrival}", request.Kind, request.DestinationId, request.TerritoryId, request.ForceTransfer, request.ArrivalPosition);
+        services.Log.Debug("[FN_TRACE] Transfer requested; kind={Kind}; destination={Destination}; territory={Territory}; force={Force}; arrival={Arrival}", request.Kind, request.DestinationId, request.TerritoryId, request.ForceTransfer, request.ArrivalPosition ?? Vector3.Zero);
         var handle = Begin(); transfer = request; return handle;
     }
     public FnOperation Relocate(RelocateRequest request)
@@ -84,7 +84,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             || !float.IsFinite(request.MaximumPathLength) || request.MaximumPathLength <= 0 || request.TotalTimeout <= TimeSpan.Zero
             || request.SettleDuration < TimeSpan.Zero || request.AwayFrom is { } point && !TravelGeometry.IsFinite(point))
             throw new ArgumentOutOfRangeException(nameof(request));
-        services.Log.Debug("[FN_TRACE] Relocate requested; awayFrom={AwayFrom}; distance={Distance}; maxPath={MaxPath}; timeout={Timeout}", request.AwayFrom, request.Distance, request.MaximumPathLength, request.TotalTimeout);
+        services.Log.Debug("[FN_TRACE] Relocate requested; awayFrom={AwayFrom}; distance={Distance}; maxPath={MaxPath}; timeout={Timeout}", request.AwayFrom ?? Vector3.Zero, request.Distance, request.MaximumPathLength, request.TotalTimeout);
         var handle = Begin(); relocate = request; return handle;
     }
     private FnOperation Begin()
