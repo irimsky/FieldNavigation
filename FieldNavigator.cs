@@ -37,6 +37,8 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private Task? disposalTask;
     private (OperationStatus Status, OperationReason Reason, string Message)? pendingFinish;
     private int targetReplans;
+    private string lastTraceKey = string.Empty;
+    private DateTime nextTraceAt = DateTime.MinValue;
     private FieldNavigator(FieldNavigationHostServices services, TimeProvider? clock)
     {
         this.services = services; this.clock = clock ?? TimeProvider.System;
@@ -60,6 +62,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             || request.Recovery.PathfindTimeout <= TimeSpan.Zero || !float.IsFinite(request.LandingRadius) || request.LandingRadius <= 0
             || !float.IsFinite(request.FlightHeight) || request.FlightHeight < 0)
             throw new ArgumentOutOfRangeException(nameof(request));
+        services.Log.Debug("[FN_TRACE] Navigate requested; target={Target}; mode={Mode}; allowMount={AllowMount}; allowFlight={AllowFlight}; arrivalRadius={Radius}; grounded={Grounded}; dismounted={Dismounted}; candidates={Candidates}", request.Target, request.Movement.Mode, request.Movement.AllowMount, request.Movement.AllowFlight, request.Arrival.Radius, request.Arrival.RequireGrounded, request.Arrival.RequireDismounted, request.CandidatePositions.Count);
         var handle = Begin(); navigate = request with { CandidatePositions = request.CandidatePositions.ToArray() }; target = request.Target;
         return handle;
     }
@@ -70,6 +73,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             || request.TotalTimeout <= TimeSpan.Zero || request.ResponseTimeout <= TimeSpan.Zero || request.SettleDuration < TimeSpan.Zero
             || !float.IsFinite(request.ArrivalRadius) || request.ArrivalRadius <= 0
             || request.ArrivalPosition is { } point && !TravelGeometry.IsFinite(point)) throw new ArgumentOutOfRangeException(nameof(request));
+        services.Log.Debug("[FN_TRACE] Transfer requested; kind={Kind}; destination={Destination}; territory={Territory}; force={Force}; arrival={Arrival}", request.Kind, request.DestinationId, request.TerritoryId, request.ForceTransfer, request.ArrivalPosition);
         var handle = Begin(); transfer = request; return handle;
     }
     public FnOperation Relocate(RelocateRequest request)
@@ -80,6 +84,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             || !float.IsFinite(request.MaximumPathLength) || request.MaximumPathLength <= 0 || request.TotalTimeout <= TimeSpan.Zero
             || request.SettleDuration < TimeSpan.Zero || request.AwayFrom is { } point && !TravelGeometry.IsFinite(point))
             throw new ArgumentOutOfRangeException(nameof(request));
+        services.Log.Debug("[FN_TRACE] Relocate requested; awayFrom={AwayFrom}; distance={Distance}; maxPath={MaxPath}; timeout={Timeout}", request.AwayFrom, request.Distance, request.MaximumPathLength, request.TotalTimeout);
         var handle = Begin(); relocate = request; return handle;
     }
     private FnOperation Begin()
@@ -217,6 +222,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             if (search.Exhausted) { Finish(OperationStatus.Failed, OperationReason.NoPath, message); return; }
             if (search.Result is not { } point) return;
             candidate = point; search.Dispose(); search = null;
+            Trace("candidate", $"resolved={candidate}; requestedTarget={target}; inFlight={frame.Travel.Flight.InFlight}; forceGround={forceGround}");
             StartJourney(frame);
         }
         var observation = Observe(frame);
@@ -284,6 +290,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;
+        Trace("journey-start", $"candidate={candidate}; selectedMode={mode}; canFly={observation.CanFly}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}");
         journey.Start(new TravelRequest
         {
             Destination = candidate, ApproachPoint = candidate, LandingPoint = candidate,
@@ -309,12 +316,25 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     }
     private void Publish(OperationStatus status = OperationStatus.Running, OperationReason reason = OperationReason.None)
     {
+        Trace("operation", $"status={status}; phase={phase}; reason={reason}; message={message}; attempts={attempts}; recoveries={recoveries}");
         active?.Publish(new(active.Snapshot.OperationId, status, phase, reason, message, attempts, recoveries,
             clock.GetElapsedTime(started), relocation?.Destination ?? (navigate is not null && attempts > 0 ? candidate : null), recoveryMode));
+    }
+
+    private void Trace(string category, string detail)
+    {
+        DateTime now = DateTime.UtcNow;
+        string key = category + "|" + detail;
+        if (key == lastTraceKey && now < nextTraceAt)
+            return;
+        lastTraceKey = key;
+        nextTraceAt = now.AddSeconds(2);
+        services.Log.Debug("[FN_TRACE] {Category}; {Detail}", category, detail);
     }
     private void Finish(OperationStatus status, OperationReason reason, string text, bool cancelMountCast = false)
     {
         if (active is null) return;
+        services.Log.Debug("[FN_TRACE] finish; status={Status}; reason={Reason}; message={Message}; attempts={Attempts}; recoveries={Recoveries}", status, reason, text, attempts, recoveries);
         message = text;
         pendingFinish = (status, reason, text);
         // Retain the operation on cleanup failure, and retry on the next Framework tick.
