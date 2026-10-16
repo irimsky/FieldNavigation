@@ -77,7 +77,7 @@ public interface ITravelMovementControl : ITravelRecoveryControl
     bool TryTakeoff(DateTime now);
     string TakeoffStatus => "等待飞行状态确认";
     void ResetTakeoff();
-    void CancelMountCast();
+    void CancelMountCast(string reason);
 }
 
 public sealed class TravelMovementControl(MountAdapter mount, TakeoffAdapter takeoff) : ITravelMovementControl
@@ -87,7 +87,7 @@ public sealed class TravelMovementControl(MountAdapter mount, TakeoffAdapter tak
     public bool TryTakeoff(DateTime now) => takeoff.TryTakeoff(now, true);
     public string TakeoffStatus => takeoff.Status;
     public void ResetTakeoff() => takeoff.Reset();
-    public void CancelMountCast() => mount.CancelMountCast();
+    public void CancelMountCast(string reason) => mount.CancelMountCast(reason);
     public bool TryJump() => mount.TryJump();
 }
 

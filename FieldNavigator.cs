@@ -41,7 +41,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     {
         this.services = services; this.clock = clock ?? TimeProvider.System;
         navigation = services.SharedNavigation ?? new VnavmeshIpc(services.PluginInterface, () => services.Objects.LocalPlayer?.Position);
-        mount = services.SharedMount ?? new MountAdapter(services.Condition, services.Objects);
+        mount = services.SharedMount ?? new MountAdapter(services.Condition, services.Objects, services.Log);
         descent = services.SharedLanding ?? new LandingAdapter(services.Interop);
         ownsDescent = services.SharedLanding is null;
         zones = new(services.DataManager); runtime = new(services, mount, zones);
@@ -102,8 +102,13 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         try
         {
             if (pendingFinish is { } pending) { Finish(pending.Status, pending.Reason, pending.Message); return; }
-            if (current.CancellationRequested) { Finish(OperationStatus.Cancelled, OperationReason.CancelledByHost, "宿主取消操作"); return; }
+            if (current.CancellationRequested)
+            {
+                if (mount.IsMountCastActive) services.Log.Debug("[FN_MOUNT] operation cancellation observed; preserving active mount cast");
+                Finish(OperationStatus.Cancelled, OperationReason.CancelledByHost, "宿主取消操作"); return;
+            }
             RuntimeFrame frame = runtime.Read();
+            mount.ObserveMountCast("FN.Tick");
             if (!initialized)
             {
                 if (!frame.Valid || frame.Loading || frame.Dead) { Finish(OperationStatus.Failed, OperationReason.ContextChanged, "启动时角色或地图未就绪"); return; }
@@ -169,12 +174,16 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             else
             {
                 target = fresh; search?.Dispose(); search = null; rejected.Clear();
-                if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel(); journeyStarted = false; }
+                if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel("导航恢复"); journeyStarted = false; }
             }
         }
         if (!frame.Travel.MovementReady)
         {
-            if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel(); journeyStarted = false; }
+            if (journeyStarted && journey.IsMountPreparationActive && mount.IsMountCastActive)
+            {
+                phase = "Preparing"; message = "等待坐骑读条完成"; Publish(); return;
+            }
+            if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel("移动条件失效"); journeyStarted = false; }
             relocation?.Dispose(); relocation = null; jumpWaiting = false; recoveryMode = RecoveryMode.None;
             phase = "WaitingReady"; message = "等待施法/战斗/占用结束"; return;
         }
@@ -224,7 +233,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         if (result.Outcome != NavigationTravelOutcome.Failed) return;
         bool movingStall = journey.LastFailureStage is NavigationFailureStage.GroundStall or NavigationFailureStage.FlightStall;
         if (!ConsumeRecovery()) return;
-        journey.Cancel(); journeyStarted = false;
+        journey.Cancel("导航恢复"); journeyStarted = false;
         if (!movingStall) { rejected.Add(candidate); Replan(); return; }
         recoveryStarted = clock.GetTimestamp();
         recoveryMode = frame.Travel.Flight.InFlight ? RecoveryMode.Airborne : RecoveryMode.Ground;
@@ -239,7 +248,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private void RejectCandidate(RuntimeFrame frame)
     {
         if (!ConsumeRecovery()) return;
-        journey.Cancel(); journeyStarted = false; rejected.Add(candidate); Replan();
+        journey.Cancel("导航恢复"); journeyStarted = false; rejected.Add(candidate); Replan();
     }
     private bool ConsumeRecovery()
     {
@@ -303,21 +312,21 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         active?.Publish(new(active.Snapshot.OperationId, status, phase, reason, message, attempts, recoveries,
             clock.GetElapsedTime(started), relocation?.Destination ?? (navigate is not null && attempts > 0 ? candidate : null), recoveryMode));
     }
-    private void Finish(OperationStatus status, OperationReason reason, string text)
+    private void Finish(OperationStatus status, OperationReason reason, string text, bool cancelMountCast = false)
     {
         if (active is null) return;
         message = text;
         pendingFinish = (status, reason, text);
         // Retain the operation on cleanup failure, and retry on the next Framework tick.
-        try { Cleanup(); }
+        try { Cleanup(cancelMountCast); }
         catch (Exception ex) { phase = "CleaningUp"; message = $"{text}；清理等待重试：{ex.Message}"; Publish(OperationStatus.Cancelling, reason); return; }
         phase = status.ToString(); Publish(status, reason); pendingFinish = null;
         notifications.Enqueue(active); active = null;
     }
-    private void Cleanup()
+    private void Cleanup(bool cancelMountCast = false)
     {
         search?.Dispose(); search = null;
-        if (journeyStarted) { journey.Cancel(); journeyStarted = false; }
+        if (journeyStarted) { journey.Cancel("操作清理", cancelMountCast); journeyStarted = false; }
         relocation?.Dispose(); relocation = null;
         descent.StopDescending();
         if (transferSession is { Attempts: > 0 } pending && (pending.IsBusy || services.Condition.Any(
@@ -376,7 +385,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         if (frameworkAvailable)
         {
             Release(() => relocation?.Dispose());
-            Release(journey.Dispose);
+            Release(() => journey.Cancel("释放导航", cancelMountCast: true));
             Release(navigation.Stop);
         }
         relocation = null; transferSession = null;

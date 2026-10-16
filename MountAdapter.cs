@@ -10,11 +10,14 @@ namespace FieldNavigation;
 /// Framework-thread-only mount actions. Conditions authorize riding; native state blocks
 /// duplicate requests and premature dismount completion while the two signals synchronize.
 /// </summary>
-public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objectTable) : ITravelRecoveryControl
+public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objectTable, IPluginLog? log = null) : ITravelRecoveryControl
 {
     private const uint MountRouletteActionId = 9;
     private const uint DismountActionId = 23;
     private readonly MountRequestGate mountRequests = new();
+    private readonly IPluginLog? pluginLog = log;
+    private bool? lastObservedMountCast;
+    private DateTime nextMountCastDiagnosticAt;
     private DateTime nextDismountAt;
     private ulong? mountCastOwner;
 
@@ -85,8 +88,16 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
 
     public bool TryMount() => this.TryMount(null);
 
-    public bool TryMount(Action? onRequest) => this.mountRequests.TryRequest(
-        DateTime.UtcNow, this.State, this.CanAttemptMount, () => this.RequestMount(onRequest));
+    public bool TryMount(Action? onRequest)
+    {
+        bool accepted = this.mountRequests.TryRequest(
+            DateTime.UtcNow, this.State, this.CanAttemptMount, () => this.RequestMount(onRequest));
+        if (accepted)
+            this.pluginLog?.Debug("[FN_MOUNT] mount request accepted; blockReason={BlockReason}; mounted={Mounted}; nativeMounted={NativeMounted}; transition={Transition}; inFlight={InFlight}; position={Position}",
+                this.MountBlockReason, this.IsMounted, this.IsNativeMounted, this.IsMountTransition, this.IsInFlight,
+                this.objectTable.LocalPlayer?.Position);
+        return accepted;
+    }
 
     private bool RequestMount(Action? onRequest)
     {
@@ -102,18 +113,50 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
 
         this.mountCastOwner = objectTable.LocalPlayer?.GameObjectId;
         onRequest?.Invoke();
-        return manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
+        bool accepted = manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
+        this.pluginLog?.Debug("[FN_MOUNT] UseAction mount result={Result}; owner={Owner}; position={Position}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}",
+            accepted, this.mountCastOwner, this.objectTable.LocalPlayer?.Position,
+            condition[ConditionFlag.InCombat], condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87],
+            condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent]);
+        return accepted;
     }
 
     /// <summary>The host must validate ownership and character before cancelling its mount request.</summary>
-    public void CancelMountCast()
+    public void CancelMountCast(string reason)
     {
         var player = objectTable.LocalPlayer;
-        if (player is not { IsCasting: true } || player.GameObjectId != this.mountCastOwner || !(player.CastActionType == (byte)ActionType.Mount
-            || player.CastActionType == (byte)ActionType.GeneralAction && player.CastActionId == 9))
+        bool active = this.IsMountCastActive;
+        this.pluginLog?.Debug("[FN_MOUNT] cancel requested; reason={Reason}; active={Active}; owner={Owner}; castActionType={CastActionType}; castActionId={CastActionId}; mounted={Mounted}; nativeMounted={NativeMounted}; transition={Transition}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}; position={Position}",
+            reason, active, this.mountCastOwner, player?.CastActionType, player?.CastActionId,
+            this.IsMounted, this.IsNativeMounted, this.IsMountTransition, condition[ConditionFlag.InCombat],
+            condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87] || player?.IsCasting == true,
+            condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent],
+            player?.Position);
+        if (!active)
             return;
         var ui = FFXIVClientStructs.FFXIV.Client.Game.UI.UIState.Instance();
-        if (ui != null) ui->Hotbar.CancelCast();
+        if (ui != null)
+        {
+            ui->Hotbar.CancelCast();
+            this.pluginLog?.Debug("[FN_MOUNT] owned mount cast cancelled; reason={Reason}", reason);
+        }
+    }
+
+    public void ObserveMountCast(string source)
+    {
+        bool active = this.IsMountCastActive;
+        DateTime now = DateTime.UtcNow;
+        if (this.lastObservedMountCast == active && (!active || now < this.nextMountCastDiagnosticAt))
+            return;
+        this.lastObservedMountCast = active;
+        this.nextMountCastDiagnosticAt = now.AddSeconds(2);
+        var player = objectTable.LocalPlayer;
+        this.pluginLog?.Debug("[FN_MOUNT] cast state; source={Source}; active={Active}; owner={Owner}; castActionType={CastActionType}; castActionId={CastActionId}; mountTransition={MountTransition}; mounted={Mounted}; nativeMounted={NativeMounted}; inFlight={InFlight}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}; position={Position}",
+            source, active, this.mountCastOwner, player?.CastActionType, player?.CastActionId, this.IsMountTransition,
+            this.IsMounted, this.IsNativeMounted, this.IsInFlight, condition[ConditionFlag.InCombat],
+            condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87] || player?.IsCasting == true,
+            condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent],
+            player?.Position);
     }
 
     public bool TryDismount()

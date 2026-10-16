@@ -111,7 +111,7 @@ public sealed class TravelJourney : IDisposable
             || request.LandingTimeout <= TimeSpan.Zero || request.Arrival.SettleDuration < TimeSpan.Zero
             || request.MaximumMountRequests <= 0 || request.MaximumReplans < 0)
             throw new ArgumentOutOfRangeException(nameof(request));
-        this.Cancel();
+        this.Cancel("开始新导航");
         this.request = request;
         this.character = observation.Character; this.territory = observation.Territory;
         this.noFlyExempt = observation.NoFlyExempt;
@@ -140,7 +140,7 @@ public sealed class TravelJourney : IDisposable
     public TravelJourneyUpdate Tick(TravelObservation frame)
     {
         if (this.request is null) return this.Update(NavigationTravelOutcome.None);
-        if (Volatile.Read(ref this.cancelRequested) != 0) { this.Cancel(); return this.Update(NavigationTravelOutcome.Cancelled); }
+        if (Volatile.Read(ref this.cancelRequested) != 0) { this.Cancel("宿主请求取消", cancelMountCast: true); return this.Update(NavigationTravelOutcome.Cancelled); }
         if (this.State is TravelJourneyState.Cancelled or TravelJourneyState.Failed)
             return this.Update(this.State == TravelJourneyState.Failed ? NavigationTravelOutcome.Failed : NavigationTravelOutcome.Cancelled);
         if (!frame.TargetValid || !TravelGeometry.IsFinite(frame.Position)
@@ -354,18 +354,18 @@ public sealed class TravelJourney : IDisposable
     private void Change(TravelJourneyState state, string message) { this.State = state; this.phaseStarted = this.clock.GetTimestamp(); this.reason = message; }
     private TravelJourneyUpdate Update(NavigationTravelOutcome outcome, string? message = null)
     { if (message is not null) this.reason = message; return new(this.State, outcome, this.selected, this.reason); }
-    private TravelJourneyUpdate Fail(string message) { this.Cancel(); this.State = TravelJourneyState.Failed; return this.Update(NavigationTravelOutcome.Failed, message); }
+    private TravelJourneyUpdate Fail(string message) { this.Cancel($"导航失败：{message}"); this.State = TravelJourneyState.Failed; return this.Update(NavigationTravelOutcome.Failed, message); }
     /// <summary>May be called from UI. All game actions and path cleanup run on the next Framework tick.</summary>
     public void RequestCancel() => Volatile.Write(ref this.cancelRequested, 1);
-    public void Cancel()
+    public void Cancel(string reason = "导航取消", bool cancelMountCast = false)
     {
         try { this.travel.Cancel(); }
         finally { this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff(); }
-        if (this.ownsMount) this.movement.CancelMountCast();
+        if (this.ownsMount && cancelMountCast) this.movement.CancelMountCast(reason);
         this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
         this.intermediateDestination = null;
         this.State = TravelJourneyState.Cancelled;
-        this.reason = "导航已取消";
+        this.reason = reason;
     }
-    public void Dispose() => this.Cancel();
+    public void Dispose() => this.Cancel("释放导航", cancelMountCast: true);
 }
