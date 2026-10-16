@@ -1,4 +1,4 @@
-﻿using System.Numerics;
+using System.Numerics;
 using Dalamud.Plugin.Ipc;
 
 namespace FieldNavigation;
@@ -20,15 +20,24 @@ internal sealed class TransferSession
     private bool transitionSeen;
     private long submitted;
     private long? stable;
+    private readonly VnavmeshIpc navigation;
+    private readonly MountAdapter mount;
+    private readonly LandingSession landing;
+    private bool preparingLanding, backendActive;
+    private long? landingStarted;
+    private long? nextDiagnostic;
+    private string lastDiagnostic = "";
     private Vector3 anchor;
     public int Attempts { get; private set; }
     public bool Succeeded { get; private set; }
     public bool Failed { get; private set; }
     public string Message { get; private set; } = "等待传送条件和位置稳定";
     public OperationReason Reason { get; private set; }
-    public TransferSession(FieldNavigationHostServices services, TransferRequest request, RuntimeFrame frame, TimeProvider clock)
+    public TransferSession(FieldNavigationHostServices services, TransferRequest request, RuntimeFrame frame, TimeProvider clock,
+        VnavmeshIpc navigation, MountAdapter mount, IDescentControl descent)
     {
         this.services = services; this.request = request; this.clock = clock;
+        this.navigation = navigation; this.mount = mount; landing = new(navigation, descent);
         arrivalPosition = request.ArrivalPosition ?? TransferDestinationResolver.Find(services.DataManager, request.Kind, request.DestinationId, request.TerritoryId);
         started = clock.GetTimestamp(); origin = frame.Travel.Territory; job = frame.Job;
         busy = services.PluginInterface.GetIpcSubscriber<bool>("Lifestream.IsBusy");
@@ -45,14 +54,14 @@ internal sealed class TransferSession
     public void Tick(RuntimeFrame frame)
     {
         if (Succeeded || Failed) return;
-        if (clock.GetElapsedTime(started) >= request.TotalTimeout) { Fail(OperationReason.BudgetExceeded, "传送总期限耗尽"); return; }
+        if (clock.GetElapsedTime(started) >= request.TotalTimeout) { Fail(OperationReason.BudgetExceeded, $"传送总期限耗尽；最后状态：{Message}"); return; }
         if (!busy.HasFunction || (request.Kind == TransferKind.Aetheryte ? !teleport.HasFunction : !aethernet.HasFunction))
         { Fail(OperationReason.BackendUnavailable, "Lifestream 传送接口不可用"); return; }
         if (frame.Loading) { if (Attempts > 0) transitionSeen = true; stable = null; Message = "等待传送切图完成"; return; }
         if (!frame.Valid || frame.Dead || frame.Job != job) { Fail(OperationReason.ContextChanged, "传送期间角色或职业状态失效"); return; }
         uint territory = frame.Travel.Territory;
         if (territory != origin && territory != request.TerritoryId) { Fail(OperationReason.ContextChanged, "传送进入了意外区域"); return; }
-        bool active = busy.InvokeFunc();
+        bool active = backendActive = busy.InvokeFunc();
         bool arrived = territory == request.TerritoryId
             && (arrivalPosition is not { } point || (request.ArrivalUse3DDistance ? Vector3.Distance(frame.Travel.Position, point) : TravelGeometry.HorizontalDistance(frame.Travel.Position, point)) <= request.ArrivalRadius)
             && (!request.ForceTransfer || Attempts > 0 && transitionSeen);
@@ -62,18 +71,78 @@ internal sealed class TransferSession
             if (Stable(frame.Travel.Position, request.SettleDuration)) { Succeeded = true; Message = "实际传送抵达并稳定"; }
             return;
         }
-        if (frame.Casting || frame.Occupied || frame.InCombat || active || frame.Travel.Flight.InFlight
-            || frame.Travel.Flight.Jumping || frame.Travel.Flight.MountTransition)
-        { stable = null; Message = "等待传送/咏唱/占用结束"; return; }
+        string? blocked = frame.Casting ? "等待咏唱结束"
+            : frame.Occupied ? "等待角色占用结束"
+            : frame.InCombat ? "等待脱离战斗"
+            : active ? "等待 Lifestream 当前操作结束"
+            : frame.Travel.Flight.MountTransition ? "等待坐骑过渡结束"
+            : frame.Travel.Flight.Jumping ? "等待跳跃结束" : null;
+        if (blocked is not null)
+        {
+            StopPreparation(); stable = null; Message = blocked; return;
+        }
+        if (frame.Travel.Flight.InFlight || preparingLanding)
+        {
+            stable = null;
+            landingStarted ??= clock.GetTimestamp();
+            if (clock.GetElapsedTime(landingStarted.Value) >= TimeSpan.FromSeconds(30))
+            { Fail(OperationReason.LandingFailed, "传送准备落地超过30秒，未发起传送"); return; }
+            if (!preparingLanding)
+            {
+                if (!navigation.IsAvailable) { Message = "传送前落地：等待导航网格就绪"; return; }
+                if (navigation.Raw.IsMoveActive && !navigation.IsMoveActive)
+                { Fail(OperationReason.MovementConflict, "传送前落地发现外部移动，未抢占"); return; }
+                preparingLanding = true;
+            }
+            var status = landing.Update(frame.Travel.Now, frame.Travel.Position, frame.Travel.Flight);
+            if (status == LandingStatus.Approaching) navigation.Pump(frame.Travel.MovementReady);
+            Message = $"传送前自动落地：{status}";
+            if (status != LandingStatus.Landed) return;
+            StopPreparation();
+        }
+        if (!frame.Travel.Dismounted)
+        {
+            mount.TryDismount(); stable = null; Message = "传送前等待实际下坐骑"; return;
+        }
+        if (navigation.Raw.IsMoveActive)
+        { stable = null; Message = "传送前等待外部导航停止"; return; }
         if (Attempts > 0 && clock.GetElapsedTime(submitted) < request.ResponseTimeout)
         { stable = null; Message = "等待传送实际响应"; return; }
         if (transitionSeen) { Fail(OperationReason.TransferNotConfirmed, "传送切图后未到达指定目的地，未重复发起"); return; }
         if (Attempts >= request.MaximumAttempts) { Fail(OperationReason.TransferNotConfirmed, "传送尝试次数耗尽"); return; }
-        if (!Stable(frame.Travel.Position, TimeSpan.FromSeconds(1))) return;
+        if (!Stable(frame.Travel.Position, TimeSpan.FromSeconds(1)))
+        { Message = "传送前等待位置连续稳定1秒"; return; }
         Attempts++; submitted = clock.GetTimestamp(); stable = null;
         bool accepted = request.Kind == TransferKind.Aetheryte
             ? teleport.InvokeFunc(request.DestinationId, request.SubIndex) : aethernet.InvokeFunc(request.DestinationId);
         Message = accepted ? "传送请求已接受，等待实际抵达" : "传送请求被拒绝，按预算等待后重试";
+    }
+    public void StopPreparation()
+    {
+        landing.Reset();
+        if (preparingLanding) navigation.Stop();
+        preparingLanding = false;
+    }
+    public void ReportStatus(RuntimeFrame frame)
+    {
+        long now = clock.GetTimestamp();
+        string summary = $"{Message}; flight={frame.Travel.Flight.InFlight}; mounted={!frame.Travel.Dismounted}; "
+            + $"casting={frame.Casting}; occupied={frame.Occupied}; combat={frame.InCombat}; backendBusy={backendActive}";
+        if (nextDiagnostic is not null && now < nextDiagnostic && summary == lastDiagnostic) return;
+        // Position and continuously changing counters are deliberately omitted from the change key.
+        nextDiagnostic = now + 5 * clock.TimestampFrequency; lastDiagnostic = summary;
+        string occupiedFlags = frame.Occupied ? string.Join(",", new[] {
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.Occupied,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInEvent,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInQuestEvent,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.OccupiedInCutSceneEvent,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.WatchingCutscene,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.Crafting,
+            Dalamud.Game.ClientState.Conditions.ConditionFlag.Gathering,
+        }.Where(flag => services.Condition[flag])) : "";
+        services.Log.Information("[FN_TRANSFER] {Status}; origin={Origin}; current={Current}; destination={Destination}; attempts={Attempts}/{Maximum}; elapsed={Elapsed:F1}s; position={Position}; occupiedFlags=[{Flags}]",
+            summary, origin, frame.Travel.Territory, request.TerritoryId, Attempts, request.MaximumAttempts,
+            clock.GetElapsedTime(started).TotalSeconds, frame.Travel.Position, occupiedFlags);
     }
     private bool Stable(Vector3 position, TimeSpan duration)
     {
