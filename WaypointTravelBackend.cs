@@ -12,13 +12,14 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     private long queryStarted;
     private Vector3 queryOrigin, queryDestination;
     private bool ownsPath, flying;
+    private bool waitingForBackendCancellation;
     public bool DirectGround { get; set; }
     public TimeSpan QueryTimeout { get; set; } = TimeSpan.FromSeconds(30);
     public float MaximumPathLength { get; set; } = float.PositiveInfinity;
     public float MaximumStartDrift { get; set; } = 3;
     public string LastFailure { get; private set; } = "";
     public bool IsAvailable => backend.IsLoaded && (this.DirectGround || backend.IsReady);
-    public bool IsMoveInProgress => this.query is not null;
+    public bool IsMoveInProgress => this.query is not null || this.waitingForBackendCancellation || backend.IsMoveInProgress;
     public bool IsPathRunning => this.ownsPath && (backend is IOwnedWaypointNavigationBackend { SupportsOwnedPaths: true } owned
         ? owned.IsOwnedPathRunning : backend.IsPathRunning);
     public bool IsMoveActive => this.IsMoveInProgress || this.IsPathRunning;
@@ -27,8 +28,9 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     {
         if (!TravelGeometry.IsFinite(destination)) { this.LastFailure = "目标坐标无效"; return false; }
         if (!this.IsAvailable) { this.LastFailure = "vnavmesh 后端未就绪"; return false; }
+        if (this.waitingForBackendCancellation) { this.LastFailure = "等待 FN 此前取消的算路清理"; return false; }
         if (this.IsMoveActive) { this.LastFailure = "已有 FN 路径或算路正在进行"; return false; }
-        if (backend.IsBusy) { this.LastFailure = "vnavmesh 后端正在被其他路径占用"; return false; }
+        if (backend.IsBusy) { this.LastFailure = "vnavmesh 仍有未归属的算路活动"; return false; }
         if (!backend.MovementAllowed) { this.LastFailure = "vnavmesh 当前禁止移动"; return false; }
         if (position() is not { } origin || !TravelGeometry.IsFinite(origin)) { this.LastFailure = "角色位置无效"; return false; }
         this.ownsPath = false;
@@ -51,6 +53,11 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     /// <summary>Call after identity/zone/stop checks; no task continuation starts movement.</summary>
     public void Pump(bool movementReady)
     {
+        if (this.waitingForBackendCancellation)
+        {
+            if (!backend.IsMoveInProgress) this.waitingForBackendCancellation = false;
+            else return;
+        }
         if (this.ownsPath && !this.IsPathRunning)
         {
             this.ownsPath = false;
@@ -64,7 +71,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
         { this.LastFailure = "路径计算失败或已取消"; this.ReleaseQuery(); return; }
         if (!movementReady) return;
         List<Vector3> path = pending.GetAwaiter().GetResult();
-        this.ReleaseQuery();
+        this.ReleaseQuery(waitForBackendCancellation: false);
         if (position() is not { } current || !TravelGeometry.IsFinite(current)
             || Vector3.Distance(current, this.queryOrigin) > this.MaximumStartDrift)
         { this.LastFailure = "算路期间起点发生偏移"; return; }
@@ -87,7 +94,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
         this.ownsPath = false;
     }
     public void CancelCalculation() => this.ReleaseQuery();
-    private void ReleaseQuery()
+    private void ReleaseQuery(bool waitForBackendCancellation = true)
     {
         if (this.query is { } pending)
             _ = pending.ContinueWith(static t => { _ = t.Exception; }, CancellationToken.None,
@@ -95,6 +102,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
         this.query = null;
         var source = this.cancellation; this.cancellation = null;
         if (source is not null) { try { source.Cancel(); } finally { source.Dispose(); } }
+        this.waitingForBackendCancellation = waitForBackendCancellation && backend.IsMoveInProgress;
     }
     public Vector3? FindNearestReachablePoint(Vector3 point, float halfExtentXZ = 20f, float halfExtentY = 100f) =>
         backend.FindNearestReachablePoint(point, halfExtentXZ, halfExtentY);
