@@ -38,8 +38,8 @@ public sealed unsafe class LandingAdapter : IDisposable, IDescentControl
 
         this.disposed = true;
         this.descending = false;
-        this.getInputStatusHook.Disable();
-        this.getInputStatusHook.Dispose();
+        try { this.getInputStatusHook.Disable(); }
+        finally { this.getInputStatusHook.Dispose(); }
     }
 
     private bool GetInputStatusDetour(InputManager* manager, InputCode inputCode)

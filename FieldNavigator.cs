@@ -1,10 +1,10 @@
-﻿using System.Numerics;
+using System.Numerics;
 using System.Diagnostics;
 
 namespace FieldNavigation;
 
 /// <summary>Framework-owned navigation, transfers and relocation. UI reads managed handles only.</summary>
-public sealed class FieldNavigator : IDisposable
+public sealed class FieldNavigator : IDisposable, IAsyncDisposable
 {
     private readonly FieldNavigationHostServices services;
     private readonly TimeProvider clock;
@@ -32,6 +32,9 @@ public sealed class FieldNavigator : IDisposable
     private RecoveryMode recoveryMode;
     private string phase = "Pending", message = "等待 Framework 推进";
     private bool disposed;
+    private int disposalRequested;
+    private readonly object disposalGate = new();
+    private Task? disposalTask;
     private (OperationStatus Status, OperationReason Reason, string Message)? pendingFinish;
     private int targetReplans;
     private FieldNavigator(FieldNavigationHostServices services, TimeProvider? clock)
@@ -81,7 +84,7 @@ public sealed class FieldNavigator : IDisposable
     }
     private FnOperation Begin()
     {
-        AssertFramework(); ObjectDisposedException.ThrowIf(disposed, this);
+        AssertFramework(); ObjectDisposedException.ThrowIf(disposed || Volatile.Read(ref disposalRequested) != 0, this);
         if (active is not null) throw new InvalidOperationException("先取消并等待当前 FN 操作完成清理，再发起新操作。");
         active = new(); navigate = null; transfer = null; relocate = null;
         recoveries = attempts = targetReplans = 0; pendingFinish = null; initialized = journeyStarted = exitReached = forceGround = jumpWaiting = false;
@@ -91,7 +94,7 @@ public sealed class FieldNavigator : IDisposable
     }
     public void Tick()
     {
-        AssertFramework(); if (disposed) return;
+        AssertFramework(); if (disposed || Volatile.Read(ref disposalRequested) != 0) return;
         // Dispatch last tick's completions before processing new operations. New callback requests only run next tick.
         var current = active;
         while (notifications.TryDequeue(out var completed)) completed.Notify(ex => services.Log.Error(ex, "FN 完成通知异常"));
@@ -319,17 +322,63 @@ public sealed class FieldNavigator : IDisposable
         if (!services.Framework.IsInFrameworkUpdateThread) throw new InvalidOperationException("FN 启动、更新和卸载必须在 Framework 线程调用。");
     }
     private static void CheckFinite(Vector3 position) { if (!TravelGeometry.IsFinite(position)) throw new ArgumentOutOfRangeException(nameof(position)); }
+    /// <summary>Await from an async plugin disposer; never blocks the Framework thread.</summary>
+    public ValueTask DisposeAsync()
+    {
+        lock (disposalGate)
+        {
+            if (disposalTask is not null) return new(disposalTask);
+            Interlocked.Exchange(ref disposalRequested, 1);
+            active?.Cancel();
+            disposalTask = services.Framework.RunOnFrameworkThread(() =>
+            {
+                if (services.Framework.IsInFrameworkUpdateThread) Dispose();
+                else if (services.Framework.IsFrameworkUnloading) DisposeAfterFrameworkShutdown();
+                else throw new InvalidOperationException("Framework 未将 FN 卸载调度到框架线程。");
+            });
+            return new(disposalTask);
+        }
+    }
+
+    /// <summary>Synchronous cleanup only on Framework. Other threads must await DisposeAsync.</summary>
     public void Dispose()
     {
-        AssertFramework(); if (disposed) return;
-        if (active is not null)
+        if (disposed) return;
+        AssertFramework();
+        DisposeCore(frameworkAvailable: true);
+    }
+
+    // The Framework dispatcher may execute inline after it has been destroyed.
+    // Only invalidate managed work and release hooks then; no IPC or game-state reads.
+    private void DisposeAfterFrameworkShutdown() => DisposeCore(frameworkAvailable: false);
+
+    private void DisposeCore(bool frameworkAvailable)
+    {
+        if (disposed) return;
+        Interlocked.Exchange(ref disposalRequested, 1);
+        disposed = true; // Invalidate first: no Tick, late result, or completion handler may restart work.
+        List<Exception> errors = [];
+        void Release(Action action) { try { action(); } catch (Exception ex) { errors.Add(ex); } }
+        Release(() => search?.Dispose()); search = null;
+        Release(navigation.Paths.CancelCalculation);
+        descent.StopDescending(); // Managed volatile flag, safe even if Framework is gone.
+        if (frameworkAvailable)
         {
-            // Detach FN's own work, not an unowned global Lifestream operation. Never start another hop after unload.
-            transferSession = null;
-            Finish(OperationStatus.Cancelled, OperationReason.CancelledByHost, "FN 卸载；已提交的外部传送可能继续，但不会续发操作");
-            if (active is not null) throw new InvalidOperationException("FN 所属移动清理失败，必须重试 Dispose。");
+            Release(() => relocation?.Dispose());
+            Release(journey.Dispose);
+            Release(navigation.Stop);
         }
-        notifications.Clear();
-        journey.Dispose(); if (ownsDescent) descent.Dispose(); disposed = true;
+        relocation = null; transferSession = null;
+        notifications.Clear(); pendingFinish = null;
+        if (ownsDescent) Release(descent.Dispose); // Never skip the hook if earlier cleanup failed.
+        if (active is { } operation)
+        {
+            message = errors.Count == 0 ? "FN 已卸载；已提交的外部传送不会续发操作" : "FN 已停止，但部分资源释放失败";
+            phase = errors.Count == 0 ? "Cancelled" : "DisposalFailed";
+            Publish(errors.Count == 0 ? OperationStatus.Cancelled : OperationStatus.Failed,
+                errors.Count == 0 ? OperationReason.CancelledByHost : OperationReason.BackendUnavailable);
+            active = null;
+        }
+        if (errors.Count > 0) throw new AggregateException("FN 释放部分资源失败；其余资源均已尝试释放。", errors);
     }
 }
