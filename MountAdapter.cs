@@ -1,3 +1,4 @@
+using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -95,7 +96,7 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         if (accepted)
             this.pluginLog?.Debug("[FN_MOUNT] mount request accepted; blockReason={BlockReason}; mounted={Mounted}; nativeMounted={NativeMounted}; transition={Transition}; inFlight={InFlight}; position={Position}",
                 this.MountBlockReason, this.IsMounted, this.IsNativeMounted, this.IsMountTransition, this.IsInFlight,
-                this.objectTable.LocalPlayer?.Position);
+                objectTable.LocalPlayer is { } p ? p.Position : Vector3.Zero);
         return accepted;
     }
 
@@ -115,7 +116,7 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         onRequest?.Invoke();
         bool accepted = manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
         this.pluginLog?.Debug("[FN_MOUNT] UseAction mount result={Result}; owner={Owner}; position={Position}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}",
-            accepted, this.mountCastOwner, this.objectTable.LocalPlayer?.Position,
+            accepted, this.mountCastOwner ?? 0UL, objectTable.LocalPlayer is { } p ? p.Position : Vector3.Zero,
             condition[ConditionFlag.InCombat], condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87],
             condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent]);
         return accepted;
@@ -127,11 +128,11 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         var player = objectTable.LocalPlayer;
         bool active = this.IsMountCastActive;
         this.pluginLog?.Debug("[FN_MOUNT] cancel requested; reason={Reason}; active={Active}; owner={Owner}; castActionType={CastActionType}; castActionId={CastActionId}; mounted={Mounted}; nativeMounted={NativeMounted}; transition={Transition}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}; position={Position}",
-            reason, active, this.mountCastOwner, player?.CastActionType, player?.CastActionId,
+            reason, active, this.mountCastOwner ?? 0UL, player is null ? (byte)0 : player.CastActionType, player is null ? 0u : player.CastActionId,
             this.IsMounted, this.IsNativeMounted, this.IsMountTransition, condition[ConditionFlag.InCombat],
             condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87] || player?.IsCasting == true,
             condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent],
-            player?.Position);
+            player is { } p ? p.Position : Vector3.Zero);
         if (!active)
             return;
         var ui = FFXIVClientStructs.FFXIV.Client.Game.UI.UIState.Instance();
@@ -152,11 +153,11 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         this.nextMountCastDiagnosticAt = now.AddSeconds(2);
         var player = objectTable.LocalPlayer;
         this.pluginLog?.Debug("[FN_MOUNT] cast state; source={Source}; active={Active}; owner={Owner}; castActionType={CastActionType}; castActionId={CastActionId}; mountTransition={MountTransition}; mounted={Mounted}; nativeMounted={NativeMounted}; inFlight={InFlight}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}; position={Position}",
-            source, active, this.mountCastOwner, player?.CastActionType, player?.CastActionId, this.IsMountTransition,
+            source, active, this.mountCastOwner ?? 0UL, player is null ? (byte)0 : player.CastActionType, player is null ? 0u : player.CastActionId, this.IsMountTransition,
             this.IsMounted, this.IsNativeMounted, this.IsInFlight, condition[ConditionFlag.InCombat],
             condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87] || player?.IsCasting == true,
             condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent],
-            player?.Position);
+            player is { } p ? p.Position : Vector3.Zero);
     }
 
     public bool TryDismount()
