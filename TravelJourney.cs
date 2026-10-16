@@ -77,16 +77,17 @@ public sealed class TravelJourney : IDisposable
     private string reason = "尚未开始";
     public TravelJourneyState State { get; private set; }
     public TravelMovementMode Movement => this.selected;
+    public NavigationFailureStage LastFailureStage { get; private set; }
     public Vector3? ApproachPoint => this.request is null ? null : this.approach;
     public bool IntermediateWaypointPending => this.request?.IntermediateWaypoint is not null && !this.intermediateReached
         && this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling;
     public bool IntermediateWaypointReached => this.intermediateReached;
 
-    public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement, TimeProvider? clock = null)
+    public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement, TimeProvider? clock = null, bool externalRecovery = false)
     {
         this.clock = clock ?? TimeProvider.System;
         this.backend = backend; this.movement = movement;
-        this.travel = new(backend, descent, movement, this.clock);
+        this.travel = new(backend, descent, externalRecovery ? null : movement, this.clock);
         this.landing = new(backend, descent);
         this.alternativeLanding = new(backend, descent);
     }
@@ -115,6 +116,7 @@ public sealed class TravelJourney : IDisposable
         this.noFlyExempt = observation.NoFlyExempt;
         this.started = this.clock.GetTimestamp();
         this.mountRequests = this.replans = 0;
+        this.LastFailureStage = NavigationFailureStage.None;
         Volatile.Write(ref this.cancelRequested, 0);
         this.target = request.Destination;
         this.intermediateReached = false;
@@ -320,7 +322,7 @@ public sealed class TravelJourney : IDisposable
             && (!intermediate || frame.Flight.InFlight);
         var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
             arrived, frame.InsideNoFly && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
-        if (result.Outcome == NavigationTravelOutcome.Failed) return this.Fail(result.Reason);
+        if (result.Outcome == NavigationTravelOutcome.Failed) { this.LastFailureStage = result.FailureStage; return this.Fail(result.Reason); }
         if (result.Outcome == NavigationTravelOutcome.Arrived)
         {
             this.routeStarted = false;

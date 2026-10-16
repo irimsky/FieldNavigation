@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Diagnostics;
 
 namespace FieldNavigation;
@@ -10,7 +10,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     private CancellationTokenSource? cancellation;
     private Task<List<Vector3>>? query;
     private long queryStarted;
-    private Vector3 queryOrigin;
+    private Vector3 queryOrigin, queryDestination;
     private bool ownsPath, flying;
     public bool DirectGround { get; set; }
     public TimeSpan QueryTimeout { get; set; } = TimeSpan.FromSeconds(30);
@@ -29,7 +29,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
             || !backend.MovementAllowed || position() is not { } origin || !TravelGeometry.IsFinite(origin))
             return false;
         this.ownsPath = false;
-        this.flying = fly; this.queryOrigin = origin; this.LastFailure = "";
+        this.flying = fly; this.queryOrigin = origin; this.queryDestination = destination; this.LastFailure = "";
         if (this.DirectGround && !fly)
         {
             if (Vector3.Distance(origin, destination) > this.MaximumPathLength) return false;
@@ -67,7 +67,7 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
         { this.LastFailure = "算路期间起点发生偏移"; return; }
         float length = path.Count == 0 ? float.PositiveInfinity : Vector3.Distance(current, path[0]);
         for (int i = 1; i < path.Count; i++) length += Vector3.Distance(path[i - 1], path[i]);
-        if (path.Count == 0 || path.Any(p => !TravelGeometry.IsFinite(p)) || !float.IsFinite(length) || length > this.MaximumPathLength)
+        if (path.Count == 0 || Vector3.Distance(path[^1], this.queryDestination) > 3 || path.Any(p => !TravelGeometry.IsFinite(p)) || !float.IsFinite(length) || length > this.MaximumPathLength)
         { this.LastFailure = "路线为空、无效或绕行距离超过限制"; return; }
         if (!this.IsAvailable || backend.IsBusy || !backend.MovementAllowed)
         { this.LastFailure = "执行路线前后端被占用或不可用"; return; }
