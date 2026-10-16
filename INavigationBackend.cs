@@ -15,6 +15,12 @@ public interface INavigationBackend
     bool TryResolveTravelGroundDestination(Vector3 requested, bool mapWaypoint, out Vector3 destination, out string resolution);
 }
 
+
+public interface INavigationFailureInfo
+{
+    string LastFailure { get; }
+}
+
 public enum GroundDestinationKind
 {
     /// <summary>The host has already supplied a usable world position.</summary>

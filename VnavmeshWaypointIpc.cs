@@ -8,7 +8,7 @@ namespace FieldNavigation;
 /// Typed, cancellable path calculation and explicit waypoint execution. This preserves a
 /// host's arrival, flight, target, and ownership rules without using SimpleMove's late execution.
 /// </summary>
-public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWaypointNavigationBackend
+public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWaypointNavigationBackend, INavigationFailureInfo
 {
     private readonly IDalamudPluginInterface plugins;
     private readonly ICallGateSubscriber<Guid, List<Vector3>, bool, bool> moveOwned;

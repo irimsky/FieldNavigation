@@ -58,7 +58,11 @@ public sealed class NavigationSession<TPurpose>(INavigationBackend backend) wher
         if (!IsFinite(resolved))
             return this.Reject(now, NavigationRejection.GroundResolution, "地面解析返回无效坐标");
         if (!backend.MoveTo(resolved, fly))
-            return this.Reject(now, NavigationRejection.BackendRejected, "vnavmesh 拒绝导航请求");
+        {
+            string reason = backend is INavigationFailureInfo failure && !string.IsNullOrWhiteSpace(failure.LastFailure)
+                ? failure.LastFailure : "vnavmesh 拒绝导航请求";
+            return this.Reject(now, NavigationRejection.BackendRejected, reason);
+        }
 
         this.LastResolution = resolution;
         this.LastRejection = NavigationRejection.None;

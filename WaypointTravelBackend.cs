@@ -4,7 +4,7 @@ using System.Diagnostics;
 namespace FieldNavigation;
 
 /// <summary>Framework-owned calculation-only requests followed by explicit path execution.</summary>
-public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Func<Vector3?> position, TimeProvider? timeProvider = null) : INavigationBackend, INavigationPump
+public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Func<Vector3?> position, TimeProvider? timeProvider = null) : INavigationBackend, INavigationPump, INavigationFailureInfo
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private CancellationTokenSource? cancellation;
@@ -25,14 +25,17 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
 
     public bool MoveTo(Vector3 destination, bool fly)
     {
-        if (!TravelGeometry.IsFinite(destination) || !this.IsAvailable || this.IsMoveActive || backend.IsBusy
-            || !backend.MovementAllowed || position() is not { } origin || !TravelGeometry.IsFinite(origin))
-            return false;
+        if (!TravelGeometry.IsFinite(destination)) { this.LastFailure = "目标坐标无效"; return false; }
+        if (!this.IsAvailable) { this.LastFailure = "vnavmesh 后端未就绪"; return false; }
+        if (this.IsMoveActive) { this.LastFailure = "已有 FN 路径或算路正在进行"; return false; }
+        if (backend.IsBusy) { this.LastFailure = "vnavmesh 后端正在被其他路径占用"; return false; }
+        if (!backend.MovementAllowed) { this.LastFailure = "vnavmesh 当前禁止移动"; return false; }
+        if (position() is not { } origin || !TravelGeometry.IsFinite(origin)) { this.LastFailure = "角色位置无效"; return false; }
         this.ownsPath = false;
         this.flying = fly; this.queryOrigin = origin; this.queryDestination = destination; this.LastFailure = "";
         if (this.DirectGround && !fly)
         {
-            if (Vector3.Distance(origin, destination) > this.MaximumPathLength) return false;
+            if (Vector3.Distance(origin, destination) > this.MaximumPathLength) { this.LastFailure = "直达路径超过长度限制"; return false; }
             this.ownsPath = true;
             backend.MovePath([destination], false);
         }
