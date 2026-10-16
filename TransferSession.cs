@@ -21,10 +21,7 @@ internal sealed class TransferSession
     private long submitted;
     private long? stable;
     private readonly VnavmeshIpc navigation;
-    private readonly MountAdapter mount;
-    private readonly LandingSession landing;
-    private bool preparingLanding, backendActive;
-    private long? landingStarted;
+    private bool backendActive;
     private long? nextDiagnostic;
     private string lastDiagnostic = "";
     private Vector3 anchor;
@@ -34,10 +31,10 @@ internal sealed class TransferSession
     public string Message { get; private set; } = "等待传送条件和位置稳定";
     public OperationReason Reason { get; private set; }
     public TransferSession(FieldNavigationHostServices services, TransferRequest request, RuntimeFrame frame, TimeProvider clock,
-        VnavmeshIpc navigation, MountAdapter mount, IDescentControl descent)
+        VnavmeshIpc navigation)
     {
         this.services = services; this.request = request; this.clock = clock;
-        this.navigation = navigation; this.mount = mount; landing = new(navigation, descent);
+        this.navigation = navigation;
         arrivalPosition = request.ArrivalPosition ?? TransferDestinationResolver.Find(services.DataManager, request.Kind, request.DestinationId, request.TerritoryId);
         started = clock.GetTimestamp(); origin = frame.Travel.Territory; job = frame.Job;
         busy = services.PluginInterface.GetIpcSubscriber<bool>("Lifestream.IsBusy");
@@ -79,30 +76,7 @@ internal sealed class TransferSession
             : frame.Travel.Flight.Jumping ? "等待跳跃结束" : null;
         if (blocked is not null)
         {
-            StopPreparation(); stable = null; Message = blocked; return;
-        }
-        if (frame.Travel.Flight.InFlight || preparingLanding)
-        {
-            stable = null;
-            landingStarted ??= clock.GetTimestamp();
-            if (clock.GetElapsedTime(landingStarted.Value) >= TimeSpan.FromSeconds(30))
-            { Fail(OperationReason.LandingFailed, "传送准备落地超过30秒，未发起传送"); return; }
-            if (!preparingLanding)
-            {
-                if (!navigation.IsAvailable) { Message = "传送前落地：等待导航网格就绪"; return; }
-                if (navigation.Raw.IsMoveActive && !navigation.IsMoveActive)
-                { Fail(OperationReason.MovementConflict, "传送前落地发现外部移动，未抢占"); return; }
-                preparingLanding = true;
-            }
-            var status = landing.Update(frame.Travel.Now, frame.Travel.Position, frame.Travel.Flight);
-            if (status == LandingStatus.Approaching) navigation.Pump(frame.Travel.MovementReady);
-            Message = $"传送前自动落地：{status}";
-            if (status != LandingStatus.Landed) return;
-            StopPreparation();
-        }
-        if (!frame.Travel.Dismounted)
-        {
-            mount.TryDismount(); stable = null; Message = "传送前等待实际下坐骑"; return;
+            stable = null; Message = blocked; return;
         }
         if (navigation.Raw.IsMoveActive)
         { stable = null; Message = "传送前等待外部导航停止"; return; }
@@ -116,12 +90,6 @@ internal sealed class TransferSession
         bool accepted = request.Kind == TransferKind.Aetheryte
             ? teleport.InvokeFunc(request.DestinationId, request.SubIndex) : aethernet.InvokeFunc(request.DestinationId);
         Message = accepted ? "传送请求已接受，等待实际抵达" : "传送请求被拒绝，按预算等待后重试";
-    }
-    public void StopPreparation()
-    {
-        landing.Reset();
-        if (preparingLanding) navigation.Stop();
-        preparingLanding = false;
     }
     public void ReportStatus(RuntimeFrame frame)
     {

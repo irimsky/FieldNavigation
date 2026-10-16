@@ -114,7 +114,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             { Finish(OperationStatus.Failed, OperationReason.ContextChanged, "角色状态已失效"); return; }
             if (transfer is not null)
             {
-                transferSession ??= new(services, transfer, initial, clock, navigation, mount, descent);
+                transferSession ??= new(services, transfer, initial, clock, navigation);
                 transferSession.Tick(frame); transferSession.ReportStatus(frame); attempts = transferSession.Attempts;
                 phase = "Transferring"; message = transferSession.Message;
                 if (transferSession.Succeeded) Finish(OperationStatus.Succeeded, OperationReason.None, message);
@@ -309,7 +309,6 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         if (journeyStarted) { journey.Cancel(); journeyStarted = false; }
         relocation?.Dispose(); relocation = null;
         descent.StopDescending();
-        transferSession?.StopPreparation();
         if (transferSession is { Attempts: > 0 } pending && (pending.IsBusy || services.Condition.Any(
             Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas,
             Dalamud.Game.ClientState.Conditions.ConditionFlag.BetweenAreas51,
@@ -366,7 +365,6 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         if (frameworkAvailable)
         {
             Release(() => relocation?.Dispose());
-            Release(() => transferSession?.StopPreparation());
             Release(journey.Dispose);
             Release(navigation.Stop);
         }
