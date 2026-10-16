@@ -296,7 +296,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             Destination = candidate, ApproachPoint = candidate, LandingPoint = candidate,
             GroundKind = request.GroundKind == GroundDestinationKind.MapWaypoint ? GroundDestinationKind.Raw : request.GroundKind,
             Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance },
-            Arrival = request.Arrival.Policy with { Radius = Math.Min(request.Arrival.Radius, 1), HeightTolerance = Math.Min(request.Arrival.HeightTolerance, 2) },
+            Arrival = request.Arrival.Policy with { Radius = request.Arrival.Radius, HeightTolerance = Math.Min(request.Arrival.HeightTolerance, 2) },
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
             IntermediateWaypoint = waypoint, IntermediateWaypointIsMapCoordinate = true,
             OperationTimeout = request.Recovery.TotalTimeout - clock.GetElapsedTime(started),
@@ -334,7 +334,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private void Finish(OperationStatus status, OperationReason reason, string text, bool cancelMountCast = false)
     {
         if (active is null) return;
-        services.Log.Debug("[FN_TRACE] finish; status={Status}; reason={Reason}; message={Message}; attempts={Attempts}; recoveries={Recoveries}", status, reason, text, attempts, recoveries);
+        services.Log.Debug("[FN_TRACE] finish; status={Status}; reason={Reason}; message={Message}; attempts={Attempts}; recoveries={Recoveries}; target={Target}; candidate={Candidate}; position={Position}", status, reason, text, attempts, recoveries, target, candidate, runtime.Read().Travel.Position);
         message = text;
         pendingFinish = (status, reason, text);
         // Retain the operation on cleanup failure, and retry on the next Framework tick.
