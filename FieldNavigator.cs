@@ -150,6 +150,8 @@ public sealed class FieldNavigator : IDisposable
     private void TickNavigate(RuntimeFrame frame)
     {
         var request = navigate!;
+        if (request.Movement.AllowDuringCombat && frame.InCombat && !frame.Casting && !frame.Occupied)
+            frame = frame with { Travel = frame.Travel with { MovementReady = true } };
         if (active!.TakeTarget() is { } fresh && Vector3.Distance(target, fresh) > 1)
         {
             if (++targetReplans > 64) { Finish(OperationStatus.Failed, OperationReason.BudgetExceeded, "移动目标重规划次数耗尽"); return; }
@@ -187,7 +189,7 @@ public sealed class FieldNavigator : IDisposable
         if (!journeyStarted)
         {
             search ??= new(navigation, zones, request, target, operationOrigin, frame.Travel.Territory, rejected, clock);
-            search.Tick(frame.Travel.Position, frame.Travel.CanFly && !forceGround);
+            search.Tick(frame.Travel.Position, frame.Travel.CanFly && !forceGround, frame.Travel.Flight.InFlight);
             phase = "SelectingDestination"; message = search.Message;
             if (search.Exhausted) { Finish(OperationStatus.Failed, OperationReason.NoPath, message); return; }
             if (search.Result is not { } point) return;
@@ -212,7 +214,7 @@ public sealed class FieldNavigator : IDisposable
         if (!movingStall) { rejected.Add(candidate); Replan(); return; }
         recoveryStarted = clock.GetTimestamp();
         recoveryMode = frame.Travel.Flight.InFlight ? RecoveryMode.Airborne : RecoveryMode.Ground;
-        if (!frame.Travel.Flight.InFlight && !frame.Travel.Flight.MountTransition && request.Recovery.AllowJump && mount.TryJump())
+        if (!frame.InCombat && !frame.Travel.Flight.InFlight && !frame.Travel.Flight.MountTransition && request.Recovery.AllowJump && mount.TryJump())
         {
             jumpWaiting = true; jumpStarted = clock.GetTimestamp(); lastRecoveryPosition = frame.Travel.Position;
             phase = "JumpRecovery"; message = "地面跳跃并观察有效位移"; return;
@@ -232,6 +234,7 @@ public sealed class FieldNavigator : IDisposable
     }
     private void StartRelocation(RuntimeFrame frame)
     {
+        if (frame.InCombat) { Finish(OperationStatus.Failed, OperationReason.MovementStalled, "战斗位移卡住，不强行跳跃或短移"); return; }
         if (frame.Travel.Flight.InFlight && !navigate!.IgnoreNoFlyZones
             && zones.Find(frame.Travel.Territory, frame.Travel.Position) is not null
             && !zones.IsRouteExempt(frame.Travel.Territory, operationOrigin, target) && navigate.Recovery.AllowGroundFallback)
@@ -249,7 +252,7 @@ public sealed class FieldNavigator : IDisposable
     private void StartJourney(RuntimeFrame frame)
     {
         var request = navigate!;
-        bool mountAllowed = request.Movement.AllowMount && services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
+        bool mountAllowed = request.Movement.AllowMount && !frame.InCombat && services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
             .GetRowOrDefault(frame.Travel.Territory) is { Mount: true };
         TravelMovementMode mode = !mountAllowed ? TravelMovementMode.Foot : request.Movement.Mode;
         if ((!request.Movement.AllowFlight || forceGround) && mode == TravelMovementMode.Fly) mode = TravelMovementMode.GroundMount;
@@ -319,7 +322,14 @@ public sealed class FieldNavigator : IDisposable
     public void Dispose()
     {
         AssertFramework(); if (disposed) return;
-        if (active is not null) { Finish(OperationStatus.Cancelled, OperationReason.CancelledByHost, "FN 卸载"); if (active is not null) throw new InvalidOperationException("FN 清理未完成，必须重试 Dispose。"); }
+        if (active is not null)
+        {
+            // Detach FN's own work, not an unowned global Lifestream operation. Never start another hop after unload.
+            transferSession = null;
+            Finish(OperationStatus.Cancelled, OperationReason.CancelledByHost, "FN 卸载；已提交的外部传送可能继续，但不会续发操作");
+            if (active is not null) throw new InvalidOperationException("FN 所属移动清理失败，必须重试 Dispose。");
+        }
+        notifications.Clear();
         journey.Dispose(); if (ownsDescent) descent.Dispose(); disposed = true;
     }
 }

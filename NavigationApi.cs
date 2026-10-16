@@ -22,6 +22,8 @@ public sealed record MovementOptions
 {
     public TravelMovementMode Mode { get; init; } = TravelMovementMode.Automatic;
     public bool AllowMount { get; init; } = true;
+    /// <summary>Opt-in foot/combat movement. Never permits mount, takeoff or combat jump recovery.</summary>
+    public bool AllowDuringCombat { get; init; }
     public bool AllowFlight { get; init; } = true;
     public float WalkDistance { get; init; } = 20;
     public float GroundMountDistance { get; init; } = 25;

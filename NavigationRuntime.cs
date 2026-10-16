@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -47,7 +47,7 @@ internal sealed unsafe class NavigationRuntime(FieldNavigationHostServices servi
         bool mapAllowsMount = services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
             .GetRowOrDefault(services.ClientState.TerritoryType) is { Mount: true };
         var observation = new TravelObservation(DateTime.UtcNow, position,
-            new(mount.IsInFlight, mount.IsJumping, mount.IsMountTransition), mount.IsReadyForNavigation, mount.IsDismounted,
+            new(mount.IsInFlight, mount.IsJumping, mount.IsMountTransition), valid && !loading && mount.IsReadyForNavigation, valid && !loading && mount.IsDismounted,
             native != null && native->CanFly && mapAllowsMount, zone is not null, zone?.LandingPoint,
             valid && !loading && !dead && !casting && !occupied && !combat,
             valid, Character: services.PlayerState.ContentId, Territory: services.ClientState.TerritoryType);

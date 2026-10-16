@@ -27,7 +27,7 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
             }
         return queue;
     }
-    public void Tick(Vector3 position, bool canFly)
+    public void Tick(Vector3 position, bool canFly, bool inFlight)
     {
         if (Result is not null || Exhausted) return;
         if (query is { } task)
@@ -62,7 +62,12 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
         // Query the actual landing floor, not a point on an unrelated upper storey.
         pending = floor;
         cancellation = new(); queryStarted = clock.GetTimestamp();
-        try { query = navigation.FindPath(position, pending, fly, cancellation.Token); }
+        Vector3 queryOrigin = position;
+        if (!fly && inFlight)
+        {
+            if (!navigation.TryResolveTravelGroundDestination(position, true, out queryOrigin, out _)) { CancelQuery(); return; }
+        }
+        try { query = navigation.FindPath(queryOrigin, pending, fly, cancellation.Token); }
         catch { CancelQuery(); }
     }
     private void CancelQuery()
