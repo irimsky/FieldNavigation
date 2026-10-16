@@ -45,6 +45,7 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWayp
         this.nearest = plugins.GetIpcSubscriber<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPointReachable");
     }
 
+    public string LastFailure => string.Empty;
     public bool SupportsOwnedPaths => this.moveOwned.HasFunction && this.runningOwned.HasFunction && this.stopOwned.HasFunction;
     public bool IsOwnedPathRunning => this.owner is { } id && this.runningOwned.HasFunction && this.runningOwned.InvokeFunc(id);
     public bool IsLoaded => this.plugins.InstalledPlugins.Any(p => p.InternalName == "vnavmesh" && p.IsLoaded)
