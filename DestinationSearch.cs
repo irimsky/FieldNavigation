@@ -38,6 +38,10 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
             CancelQuery();
             if (valid) { Result = pending; Message = "候选点通过路径检查"; return; }
         }
+        // A locally cancelled query may still be draining in vnavmesh. Do not
+        // pile candidate queries behind it, or overwrite another caller's path.
+        if (navigation.Raw.IsMoveActive)
+        { Message = "等待导航后端完成已有查询或路径"; return; }
         if (!probes.TryDequeue(out var probe)) { Exhausted = true; Message = "原目标范围内没有可达候选点"; return; }
         Vector3 floor;
         bool airborneGoal = !request.Arrival.RequireGrounded && !request.Arrival.RequireDismounted;

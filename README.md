@@ -55,6 +55,8 @@ fn.Tick();
 OperationSnapshot state = operation.Snapshot;
 ```
 
+业务取消立即停止所属移动并使本地查询结果失效。兼容现有 vnavmesh：已提交的纯算路请求不接收业务取消令牌，而是自然结束；FN 取消本地等待、丢弃迟到结果并观察后端异常，后端结束前不追加候选查询。迟到算路不能自动执行路径，停止/死亡/切图/卸载后也不会恢复移动。Debug `[FN_QUERY]` 用 `layer=consumer` 和 `layer=backend-drain` 区分本地取消与后端完成。
+
 `Tick` 自动读取运行时快照并推进操作。所有原生读取、IPC 和动作都在 Framework 上执行；不使用后台计时器驱动角色移动。UI 只读取不可变快照、提交取消请求。
 
 ## 3. 区域内前往：Navigate

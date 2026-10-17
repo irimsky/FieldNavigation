@@ -66,9 +66,24 @@ public sealed partial class VnavmeshWaypointIpc : IWaypointNavigationBackend, IO
         if (!Finite(origin) || !Finite(destination)) throw new ArgumentException("Navigation coordinates must be finite.");
         // Correlate both candidate checks and executable routes at the shared IPC boundary.
         long queryId = this.TraceQuerySubmit(origin, destination, fly);
-        var task = this.findPath.InvokeFunc(origin, destination, fly, cancellation);
-        this.TraceQueryLifetime(queryId, task, cancellation);
-        return task;
+        // vnavmesh 1.2.3.14 can leak its active-query counter if its queued
+        // Framework delegate is cancelled before starting. Business cancellation must
+        // invalidate OUR result, never cancel the provider's queued delegate.
+        // This IPC only calculates; late completion cannot move the character.
+        var backendTask = this.findPath.InvokeFunc(origin, destination, fly, CancellationToken.None);
+        ObserveBackendFailure(backendTask);
+        this.TraceQueryLifetime(queryId, backendTask, CancellationToken.None, "backend-drain");
+        var consumerTask = backendTask.WaitAsync(cancellation);
+        this.TraceQueryLifetime(queryId, consumerTask, cancellation, "consumer");
+        return consumerTask;
+    }
+
+    private static void ObserveBackendFailure(Task<List<Vector3>> task)
+    {
+        // The consumer may have cancelled or unloaded before the backend finishes.
+        // Observe faults without retaining any IPC, navigator or host references.
+        _ = task.ContinueWith(static finished => { _ = finished.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     public void MovePath(List<Vector3> waypoints, bool fly)

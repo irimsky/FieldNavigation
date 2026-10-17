@@ -110,12 +110,13 @@ public sealed partial class VnavmeshWaypointIpc
         catch { }
     }
 
-    private void TraceQueryLifetime(long id, Task<List<Vector3>> task, CancellationToken token)
+    private void TraceQueryLifetime(long id, Task<List<Vector3>> task, CancellationToken token, string layer)
     {
         if (this.diagnosticWrite is not { } write) return;
         try
         {
-            var trace = new QueryTrace(write, id, this.diagnosticTick, this.diagnosticContext?.Invoke() ?? "operation=none");
+            var trace = new QueryTrace(write, id, this.diagnosticTick,
+                $"layer={layer}; {this.diagnosticContext?.Invoke() ?? "operation=none"}");
             this.diagnosticQueries.Add(trace);
             trace.Start(task, token);
         }
