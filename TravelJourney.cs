@@ -178,8 +178,9 @@ public sealed class TravelJourney : IDisposable
                     if (this.selected != TravelMovementMode.Foot) this.combatDowngradeMode = this.selected;
                     this.selected = TravelMovementMode.Foot;
                 }
+                // Combat blocks summoning a mount, not taking off: an already-mounted player can still fly.
                 else if (frame.MountedReady && !frame.Flight.InFlight
-                    && this.selected == TravelMovementMode.Fly)
+                    && this.selected == TravelMovementMode.Fly && (!frame.CanFly || !this.movement.CanTakeoff))
                     this.selected = TravelMovementMode.GroundMount;
                 else if (frame.MountedReady && this.selected == TravelMovementMode.Foot)
                     this.selected = TravelMovementMode.GroundMount;

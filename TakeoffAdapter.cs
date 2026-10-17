@@ -12,32 +12,48 @@ public sealed unsafe class TakeoffAdapter(ICondition condition, IObjectTable obj
     private bool requested;
     public string Status { get; private set; } = "尚未请求";
     public void Reset() { this.readySince = null; this.requested = false; this.Status = "尚未请求"; }
+
+    /// <summary>Native state accepts a takeoff request right now (readiness timer ignored).
+    /// Combat is deliberately not a blocker: the game forbids summoning a mount in combat,
+    /// but an already-mounted player can still take off and fly.</summary>
+    public bool IsReady => this.EvaluateReady(out _);
+
     public bool TryTakeoff(DateTime now, bool allowed)
     {
         if (this.requested)
             return false;
-        ActionManager* actions = ActionManager.Instance();
-        var flightStatus = Control.GetFlightAllowedStatus();
-        uint? jumpStatus = actions != null ? actions->GetActionStatus(ActionType.GeneralAction, 2) : null;
-        bool ready = allowed && actions != null && flightStatus == Control.FlightAllowedStatus.CanFly
-            && objects.LocalPlayer is { IsDead: false, IsCasting: false }
-            && condition[ConditionFlag.Mounted] && !condition[ConditionFlag.InFlight]
-            && !condition.Any(ConditionFlag.InCombat, ConditionFlag.Mounting, ConditionFlag.Mounting71,
-                ConditionFlag.MountOrOrnamentTransition, ConditionFlag.Jumping, ConditionFlag.Jumping61,
-                ConditionFlag.BetweenAreas, ConditionFlag.BetweenAreas51, ConditionFlag.LoggingOut)
-            && jumpStatus == 0;
-        if (!ready)
+        string status = "起飞未被允许";
+        if (!allowed || !this.EvaluateReady(out status))
         {
             this.readySince = null;
-            this.Status = $"条件未就绪（FlightAllowed={flightStatus}，JumpStatus={jumpStatus}，Mounted={condition[ConditionFlag.Mounted]}）";
+            this.Status = status;
             return false;
         }
         this.readySince ??= now;
         if (now - this.readySince.Value < TimeSpan.FromSeconds(1))
         { this.Status = "等待起飞条件连续稳定一秒"; return false; }
         this.requested = true;
-        bool accepted = actions->UseAction(ActionType.GeneralAction, 2);
+        ActionManager* actions = ActionManager.Instance();
+        bool accepted = actions != null && actions->UseAction(ActionType.GeneralAction, 2);
         this.Status = $"已发出跳跃请求（UseAction={accepted}），等待实际升空";
         return true;
+    }
+
+    private bool EvaluateReady(out string status)
+    {
+        ActionManager* actions = ActionManager.Instance();
+        var flightStatus = Control.GetFlightAllowedStatus();
+        uint? jumpStatus = actions != null ? actions->GetActionStatus(ActionType.GeneralAction, 2) : null;
+        bool ready = actions != null && flightStatus == Control.FlightAllowedStatus.CanFly
+            && objects.LocalPlayer is { IsDead: false, IsCasting: false }
+            && condition[ConditionFlag.Mounted] && !condition[ConditionFlag.InFlight]
+            && !condition.Any(ConditionFlag.Mounting, ConditionFlag.Mounting71,
+                ConditionFlag.MountOrOrnamentTransition, ConditionFlag.Jumping, ConditionFlag.Jumping61,
+                ConditionFlag.BetweenAreas, ConditionFlag.BetweenAreas51, ConditionFlag.LoggingOut)
+            && jumpStatus == 0;
+        status = ready
+            ? "起飞条件已就绪"
+            : $"条件未就绪（FlightAllowed={flightStatus}，JumpStatus={jumpStatus}，Mounted={condition[ConditionFlag.Mounted]}）";
+        return ready;
     }
 }

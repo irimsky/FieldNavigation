@@ -82,6 +82,8 @@ public interface ITravelMovementControl : ITravelRecoveryControl
     bool TryMount(Action onRequest);
     bool TryDismount();
     bool TryTakeoff(DateTime now);
+    /// <summary>Native state currently accepts a takeoff request (mounted, on the ground, flight allowed). Combat is not a blocker.</summary>
+    bool CanTakeoff => true;
     string TakeoffStatus => "等待飞行状态确认";
     void ResetTakeoff();
     void CancelMountCast(string reason);
@@ -92,6 +94,7 @@ public sealed class TravelMovementControl(MountAdapter mount, TakeoffAdapter tak
     public bool TryMount(Action onRequest) => mount.TryMount(onRequest);
     public bool TryDismount() => mount.TryDismount();
     public bool TryTakeoff(DateTime now) => takeoff.TryTakeoff(now, true);
+    public bool CanTakeoff => takeoff.IsReady;
     public string TakeoffStatus => takeoff.Status;
     public void ResetTakeoff() => takeoff.Reset();
     public void CancelMountCast(string reason) => mount.CancelMountCast(reason);
