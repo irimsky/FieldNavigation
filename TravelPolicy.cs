@@ -12,18 +12,22 @@ public sealed record TravelModePolicy
     public float GroundMountDistance { get; init; } = 25;
     public float WalkHeightTolerance { get; init; } = 3;
     public bool AllowDuringCombat { get; init; }
+    public bool AllowMount { get; init; } = true;
+    public bool AllowFlight { get; init; } = true;
 
     public TravelMovementMode Select(Vector3 origin, Vector3 target, bool canFly)
     {
+        if (!this.AllowMount) return TravelMovementMode.Foot;
+        bool flyAllowed = this.AllowFlight && canFly;
         if (this.Preferred != TravelMovementMode.Automatic)
-            return this.Preferred == TravelMovementMode.Fly && !canFly ? TravelMovementMode.GroundMount : this.Preferred;
+            return this.Preferred == TravelMovementMode.Fly && !flyAllowed ? TravelMovementMode.GroundMount : this.Preferred;
         float distance = TravelGeometry.HorizontalDistance(origin, target);
         if (MathF.Abs(origin.Y - target.Y) <= this.WalkHeightTolerance)
         {
             if (distance <= this.WalkDistance) return TravelMovementMode.Foot;
             if (distance <= this.GroundMountDistance) return TravelMovementMode.GroundMount;
         }
-        return canFly ? TravelMovementMode.Fly : TravelMovementMode.GroundMount;
+        return flyAllowed ? TravelMovementMode.Fly : TravelMovementMode.GroundMount;
     }
 }
 

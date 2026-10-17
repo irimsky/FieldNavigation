@@ -70,6 +70,7 @@ public sealed class TravelJourney : IDisposable
     private long? settled;
     private Vector3 settleAnchor;
     private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached;
+    private TravelMovementMode? combatDowngradeMode;
     private int mountRequests, replans, cancelRequested;
     private ulong character;
     private uint territory;
@@ -122,6 +123,7 @@ public sealed class TravelJourney : IDisposable
         Volatile.Write(ref this.cancelRequested, 0);
         this.target = request.Destination;
         this.intermediateReached = false;
+        this.combatDowngradeMode = null;
         this.noFly.Begin(observation.Now, observation.InsideNoFly && !this.noFlyExempt);
         this.Plan(observation);
     }
@@ -133,10 +135,14 @@ public sealed class TravelJourney : IDisposable
         this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
-        this.selected = this.request.IntermediateWaypoint is not null
+        this.combatDowngradeMode = null;
+        this.selected = this.request.IntermediateWaypoint is not null && this.request.Movement.AllowMount && this.request.Movement.AllowFlight
             ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
         if (this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted)
+        {
+            if (this.selected != TravelMovementMode.Foot) this.combatDowngradeMode = this.selected;
             this.selected = TravelMovementMode.Foot;
+        }
         this.Change(TravelJourneyState.Preparing, "准备前往目标");
     }
 
@@ -168,23 +174,42 @@ public sealed class TravelJourney : IDisposable
             if (frame.InCombat)
             {
                 if (frame.Dismounted && !frame.Flight.InFlight)
+                {
+                    if (this.selected != TravelMovementMode.Foot) this.combatDowngradeMode = this.selected;
                     this.selected = TravelMovementMode.Foot;
+                }
                 else if (frame.MountedReady && !frame.Flight.InFlight
                     && this.selected == TravelMovementMode.Fly)
                     this.selected = TravelMovementMode.GroundMount;
                 else if (frame.MountedReady && this.selected == TravelMovementMode.Foot)
                     this.selected = TravelMovementMode.GroundMount;
             }
-            else if (this.request.Movement.Preferred != TravelMovementMode.Foot
-                && (this.selected == TravelMovementMode.Foot || this.selected == TravelMovementMode.GroundMount))
+            else
             {
-                this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+                TravelMovementMode previous = this.selected;
+                if (this.combatDowngradeMode is { } downgraded)
+                {
+                    this.selected = downgraded switch
+                    {
+                        TravelMovementMode.Fly when frame.CanFly => TravelMovementMode.Fly,
+                        TravelMovementMode.GroundMount => TravelMovementMode.GroundMount,
+                        _ when this.request.Movement.AllowMount => TravelMovementMode.GroundMount,
+                        _ => TravelMovementMode.Foot,
+                    };
+                    this.combatDowngradeMode = null;
+                }
+                else if (this.request.Movement.Preferred != TravelMovementMode.Foot
+                    && (this.selected == TravelMovementMode.Foot || this.selected == TravelMovementMode.GroundMount))
+                {
+                    this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+                }
+                if (previous != this.selected) this.RestartRouteForModeChange(previous);
             }
         }
 
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
-        bool intermediate = this.IntermediateWaypointPending;
+        bool intermediate = this.IntermediateWaypointPending && this.selected != TravelMovementMode.Foot;
         if (intermediate)
         {
             if (!frame.CanFly || this.noFly.GroundOnly) return this.Fail("离区中转要求飞行，但当前飞行条件不可用");
@@ -376,6 +401,19 @@ public sealed class TravelJourney : IDisposable
             || TravelGeometry.HorizontalDistance(position, point) <= this.request.RequiredArrivalPointRadius
                 && MathF.Abs(position.Y - point.Y) <= this.request.Arrival.HeightTolerance);
     private void Pump(bool ready) { if (this.backend is INavigationPump pump) pump.Pump(ready); }
+    private void RestartRouteForModeChange(TravelMovementMode previous)
+    {
+        if (!this.routeStarted) return;
+        bool previousFly = previous == TravelMovementMode.Fly;
+        bool currentFly = this.selected == TravelMovementMode.Fly;
+        if (previousFly == currentFly) return;
+        this.travel.Cancel();
+        this.routeStarted = false;
+        this.preparingTakeoff = false;
+        this.movement.ResetTakeoff();
+        if (this.State == TravelJourneyState.Preparing)
+            this.Change(TravelJourneyState.Preparing, "移动模式变化，重新准备路线");
+    }
     private void Change(TravelJourneyState state, string message) { this.State = state; this.phaseStarted = this.clock.GetTimestamp(); this.reason = message; }
     private TravelJourneyUpdate Update(NavigationTravelOutcome outcome, string? message = null)
     { if (message is not null) this.reason = message; return new(this.State, outcome, this.selected, this.reason); }
@@ -389,6 +427,7 @@ public sealed class TravelJourney : IDisposable
         if (this.ownsMount && cancelMountCast) this.movement.CancelMountCast(reason);
         this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
         this.intermediateDestination = null;
+        this.combatDowngradeMode = null;
         this.State = TravelJourneyState.Cancelled;
         this.reason = reason;
     }

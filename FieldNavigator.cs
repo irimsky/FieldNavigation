@@ -290,24 +290,29 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private void StartJourney(RuntimeFrame frame)
     {
         var request = navigate!;
-        bool canContinueMounted = frame.Travel.MountedReady;
-        bool mountAllowed = request.Movement.AllowMount && (!frame.InCombat || canContinueMounted)
+        bool mountAllowed = request.Movement.AllowMount
             && services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
             .GetRowOrDefault(frame.Travel.Territory) is { Mount: true };
-        TravelMovementMode mode = !mountAllowed && !canContinueMounted ? TravelMovementMode.Foot : request.Movement.Mode;
+        // Preserve the host's original mount/flight intent. Combat is only a temporary downgrade
+        // owned by TravelJourney; replacing it with Foot here made the downgrade permanent.
+        TravelMovementMode mode = request.Movement.Mode;
         if ((!request.Movement.AllowFlight || forceGround) && mode == TravelMovementMode.Fly) mode = TravelMovementMode.GroundMount;
         var observation = Observe(frame);
-        Vector3? waypoint = !exitReached && observation.CanFly && mode is TravelMovementMode.Automatic or TravelMovementMode.Fly
+        bool combatFootDowngrade = request.Movement.AllowDuringCombat && frame.InCombat
+            && frame.Travel.Dismounted && !frame.Travel.Flight.InFlight;
+        Vector3? waypoint = !exitReached && observation.CanFly && !combatFootDowngrade
+            && mode is TravelMovementMode.Automatic or TravelMovementMode.Fly
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;
-        Trace("journey-start", $"target={target}; candidate={candidate}; selectedMode={mode}; canFly={observation.CanFly}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}; heightTolerance={request.Arrival.HeightTolerance}; use3D={request.Arrival.Use3DDistance}; requireStationary={request.Arrival.RequireStationary}");
+        Trace("journey-start", $"target={target}; candidate={candidate}; selectedMode={mode}; allowMount={mountAllowed}; allowFlight={request.Movement.AllowFlight && !forceGround}; canFly={observation.CanFly}; combatFootDowngrade={combatFootDowngrade}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}; heightTolerance={request.Arrival.HeightTolerance}; use3D={request.Arrival.Use3DDistance}; requireStationary={request.Arrival.RequireStationary}");
         journey.Start(new TravelRequest
         {
             // Candidates guide the route/landing; success is measured against the host's target.
             Destination = target, ApproachPoint = candidate, LandingPoint = candidate,
             GroundKind = request.GroundKind == GroundDestinationKind.MapWaypoint ? GroundDestinationKind.Raw : request.GroundKind,
             Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance,
+                AllowMount = mountAllowed, AllowFlight = request.Movement.AllowFlight && !forceGround,
                 AllowDuringCombat = request.Movement.AllowDuringCombat },
             Arrival = request.Arrival.Policy,
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
