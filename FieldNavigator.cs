@@ -281,9 +281,11 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private void StartJourney(RuntimeFrame frame)
     {
         var request = navigate!;
-        bool mountAllowed = request.Movement.AllowMount && !frame.InCombat && services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
+        bool canContinueMounted = frame.Travel.MountedReady;
+        bool mountAllowed = request.Movement.AllowMount && (!frame.InCombat || canContinueMounted)
+            && services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()
             .GetRowOrDefault(frame.Travel.Territory) is { Mount: true };
-        TravelMovementMode mode = !mountAllowed ? TravelMovementMode.Foot : request.Movement.Mode;
+        TravelMovementMode mode = !mountAllowed && !canContinueMounted ? TravelMovementMode.Foot : request.Movement.Mode;
         if ((!request.Movement.AllowFlight || forceGround) && mode == TravelMovementMode.Fly) mode = TravelMovementMode.GroundMount;
         var observation = Observe(frame);
         Vector3? waypoint = !exitReached && observation.CanFly && mode is TravelMovementMode.Automatic or TravelMovementMode.Fly
@@ -295,7 +297,8 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         {
             Destination = candidate, ApproachPoint = candidate, LandingPoint = candidate,
             GroundKind = request.GroundKind == GroundDestinationKind.MapWaypoint ? GroundDestinationKind.Raw : request.GroundKind,
-            Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance },
+            Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance,
+                AllowDuringCombat = request.Movement.AllowDuringCombat },
             Arrival = request.Arrival.Policy with { Radius = request.Arrival.Radius, HeightTolerance = Math.Min(request.Arrival.HeightTolerance, 2) },
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
             IntermediateWaypoint = waypoint, IntermediateWaypointIsMapCoordinate = true,

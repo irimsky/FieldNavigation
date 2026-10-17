@@ -46,7 +46,7 @@ public readonly record struct TravelObservation(DateTime Now, Vector3 Position, 
     bool MountedReady, bool Dismounted, bool CanFly, bool InsideNoFly = false,
     Vector3? NoFlyLandingPoint = null, bool MovementReady = true, bool TargetValid = true,
     Vector3? TargetPosition = null, ulong Character = 0, uint Territory = 0,
-    bool NoFlyExempt = false);
+    bool NoFlyExempt = false, bool InCombat = false);
 
 public readonly record struct TravelJourneyUpdate(TravelJourneyState State, NavigationTravelOutcome Outcome,
     TravelMovementMode Movement, string Reason);
@@ -134,6 +134,8 @@ public sealed class TravelJourney : IDisposable
             : this.target);
         this.selected = this.request.IntermediateWaypoint is not null
             ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+        if (this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted)
+            this.selected = TravelMovementMode.Foot;
         this.Change(TravelJourneyState.Preparing, "准备前往目标");
     }
 
@@ -159,6 +161,25 @@ public sealed class TravelJourney : IDisposable
             && !frame.Flight.Jumping && !frame.Flight.MountTransition) return this.Update(NavigationTravelOutcome.Arrived);
         if (!this.backend.IsAvailable) return this.Fail("导航后端不可用");
         if (!frame.MovementReady) { this.backend.Stop(); this.routeStarted = false; this.settled = null; return this.Update(NavigationTravelOutcome.Progress, "等待移动条件"); }
+
+        if (this.request.Movement.AllowDuringCombat)
+        {
+            if (frame.InCombat)
+            {
+                if (frame.Dismounted && !frame.Flight.InFlight)
+                    this.selected = TravelMovementMode.Foot;
+                else if (frame.MountedReady && !frame.Flight.InFlight
+                    && this.selected == TravelMovementMode.Fly)
+                    this.selected = TravelMovementMode.GroundMount;
+                else if (frame.MountedReady && this.selected == TravelMovementMode.Foot)
+                    this.selected = TravelMovementMode.GroundMount;
+            }
+            else if (this.request.Movement.Preferred != TravelMovementMode.Foot
+                && (this.selected == TravelMovementMode.Foot || this.selected == TravelMovementMode.GroundMount))
+            {
+                this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+            }
+        }
 
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);

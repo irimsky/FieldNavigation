@@ -11,6 +11,7 @@ public sealed record TravelModePolicy
     public float WalkDistance { get; init; } = 20;
     public float GroundMountDistance { get; init; } = 25;
     public float WalkHeightTolerance { get; init; } = 3;
+    public bool AllowDuringCombat { get; init; }
 
     public TravelMovementMode Select(Vector3 origin, Vector3 target, bool canFly)
     {

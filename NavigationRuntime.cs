@@ -50,7 +50,7 @@ internal sealed unsafe class NavigationRuntime(FieldNavigationHostServices servi
             new(mount.IsInFlight, mount.IsJumping, mount.IsMountTransition), valid && !loading && mount.IsReadyForNavigation, valid && !loading && mount.IsDismounted,
             native != null && native->CanFly && mapAllowsMount, zone is not null, zone?.LandingPoint,
             valid && !loading && !dead && !casting && !occupied && !combat,
-            valid, Character: services.PlayerState.ContentId, Territory: services.ClientState.TerritoryType);
+            valid, Character: services.PlayerState.ContentId, Territory: services.ClientState.TerritoryType, InCombat: combat);
         return new(observation, valid, loading, dead, casting, occupied, combat, player?.Rotation ?? 0,
             services.PlayerState.ClassJob.RowId);
     }
