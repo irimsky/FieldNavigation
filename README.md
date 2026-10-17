@@ -79,7 +79,7 @@ var operation = fn.Navigate(new NavigateRequest
 
 FN 自行选合法接近点，必要时骑乘和飞行，抵达附近后落地、下坐骑、完成最后步行并停稳。路径执行结束不等于成功，必须满足 `Arrival`。
 
-`Target` 是实际目标位置，候选接近点和落地点是 FN 的内部结果。宿主通常不提供预选落点，也不用在失败后自己换点。
+`Target` 是实际目标位置，候选接近点和落地点是 FN 的内部结果。宿主通常不提供预选落点，也不用在失败后自己换点。最终范围和高度容差始终以 `Target` 及宿主的 `Arrival` 为准，不以候选点另建同半径范围，也不强制把不限高度缩成 2 码。需要与避让控制共存时，可关闭 `Arrival.RequireStationary`；进入允许区域后释放所属路径并持续确认在范围内，保留落地、下坐骑及高度约束。
 
 ### 常用参数
 
@@ -91,7 +91,8 @@ FN 自行选合法接近点，必要时骑乘和飞行，抵达附近后落地�
 | `Arrival.HeightTolerance` | 允许的最大高差，与距离同时检查 |
 | `Arrival.RequireGrounded` | 成功时必须落地 |
 | `Arrival.RequireDismounted` | 成功时必须下坐骑，也要求落地 |
-| `Arrival.SettleDuration` | 成功前连续停稳的时长，重新移动后重新计时 |
+| `Arrival.SettleDuration` | 成功前持续满足到达条件的时长；默认还要求位置停稳 |
+| `Arrival.RequireStationary` | 默认 `true`；设为 `false` 时，范围内的避让移动不重置到达计时，离开允许范围仍会重置 |
 | `Movement.Mode` | `Automatic`、`Foot`、`GroundMount`、`Fly` |
 | `Movement.AllowMount / AllowFlight` | 自动选方式及恢复时都必须遵守的动作许可 |
 | `Movement.WalkDistance / GroundMountDistance` | 自动选择方式的距离阈值，同时考虑高差及实际许可 |

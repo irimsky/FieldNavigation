@@ -10,6 +10,7 @@ public enum TravelJourneyState { Idle, Preparing, Travelling, Landing, Dismounti
 /// <summary>One business travel operation. Internal replans share the original operation budget.</summary>
 public sealed record TravelRequest
 {
+    /// <summary>Business goal used for final arrival. ApproachPoint/LandingPoint may guide the route elsewhere within this goal's arrival range.</summary>
     public required Vector3 Destination { get; init; }
     /// <summary>Required airborne checkpoint used before continuing to Destination.</summary>
     public Vector3? IntermediateWaypoint { get; init; }
@@ -258,12 +259,15 @@ public sealed class TravelJourney : IDisposable
             if (inRange && !frame.Flight.Jumping && !frame.Flight.MountTransition)
             {
                 this.travel.Cancel(); this.routeStarted = false;
-                if (this.settled is null || Vector3.DistanceSquared(frame.Position, this.settleAnchor) > .01f)
+                if (this.settled is null || this.request.Arrival.RequireStationary
+                    && Vector3.DistanceSquared(frame.Position, this.settleAnchor) > .01f)
                 { this.settled = this.clock.GetTimestamp(); this.settleAnchor = frame.Position; }
                 this.State = TravelJourneyState.Settling;
                 if (this.clock.GetElapsedTime(this.settled.Value) >= this.request.Arrival.SettleDuration)
-                { this.State = TravelJourneyState.Arrived; return this.Update(NavigationTravelOutcome.Arrived, "范围、高度、落地、坐骑及停稳条件已确认"); }
-                return this.Update(NavigationTravelOutcome.Progress, "等待位置停稳");
+                { this.State = TravelJourneyState.Arrived; return this.Update(NavigationTravelOutcome.Arrived,
+                    this.request.Arrival.RequireStationary ? "范围、高度、落地、坐骑及停稳条件已确认" : "范围、高度、落地、坐骑及持续到达条件已确认"); }
+                return this.Update(NavigationTravelOutcome.Progress, this.request.Arrival.RequireStationary
+                    ? "等待位置停稳" : "等待连续处于允许到达范围");
             }
             this.settled = null;
             this.State = TravelJourneyState.FinalApproach;

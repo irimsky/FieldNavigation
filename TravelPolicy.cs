@@ -35,6 +35,8 @@ public sealed record TravelArrivalPolicy
     public bool RequireGrounded { get; init; } = true;
     public bool RequireDismounted { get; init; } = true;
     public TimeSpan SettleDuration { get; init; } = TimeSpan.FromMilliseconds(300);
+    /// <summary>When false, settling confirms continuous presence inside the goal area; movement within that area does not restart the timer.</summary>
+    public bool RequireStationary { get; init; } = true;
 
     public bool Contains(Vector3 position, Vector3 target) => TravelGeometry.IsFinite(position)
         && TravelGeometry.IsFinite(target) && MathF.Abs(position.Y - target.Y) <= this.HeightTolerance

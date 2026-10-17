@@ -301,14 +301,15 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;
-        Trace("journey-start", $"candidate={candidate}; selectedMode={mode}; canFly={observation.CanFly}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}");
+        Trace("journey-start", $"target={target}; candidate={candidate}; selectedMode={mode}; canFly={observation.CanFly}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}; heightTolerance={request.Arrival.HeightTolerance}; use3D={request.Arrival.Use3DDistance}; requireStationary={request.Arrival.RequireStationary}");
         journey.Start(new TravelRequest
         {
-            Destination = candidate, ApproachPoint = candidate, LandingPoint = candidate,
+            // Candidates guide the route/landing; success is measured against the host's target.
+            Destination = target, ApproachPoint = candidate, LandingPoint = candidate,
             GroundKind = request.GroundKind == GroundDestinationKind.MapWaypoint ? GroundDestinationKind.Raw : request.GroundKind,
             Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance,
                 AllowDuringCombat = request.Movement.AllowDuringCombat },
-            Arrival = request.Arrival.Policy with { Radius = request.Arrival.Radius, HeightTolerance = Math.Min(request.Arrival.HeightTolerance, 2) },
+            Arrival = request.Arrival.Policy,
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
             IntermediateWaypoint = waypoint, IntermediateWaypointIsMapCoordinate = true,
             OperationTimeout = request.Recovery.TotalTimeout - clock.GetElapsedTime(started),

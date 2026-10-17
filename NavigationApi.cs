@@ -15,8 +15,11 @@ public sealed record ArrivalOptions
     public bool RequireGrounded { get; init; } = true;
     public bool RequireDismounted { get; init; } = true;
     public TimeSpan SettleDuration { get; init; } = TimeSpan.FromMilliseconds(300);
+    /// <summary>Keep false when another controller may reposition within the allowed arrival area.</summary>
+    public bool RequireStationary { get; init; } = true;
     internal TravelArrivalPolicy Policy => new() { Radius = Radius, HeightTolerance = HeightTolerance, Use3DDistance = Use3DDistance,
-        RequireGrounded = RequireGrounded, RequireDismounted = RequireDismounted, SettleDuration = SettleDuration };
+        RequireGrounded = RequireGrounded, RequireDismounted = RequireDismounted, SettleDuration = SettleDuration,
+        RequireStationary = RequireStationary };
 }
 public sealed record MovementOptions
 {
