@@ -13,6 +13,10 @@ public sealed class WaypointTravelBackend(IWaypointNavigationBackend backend, Fu
     private Vector3 queryOrigin, queryDestination;
     private bool ownsPath, flying;
     private bool waitingForBackendCancellation;
+    internal bool HasPendingQueryOrPath => this.query is not null || this.ownsPath;
+    internal bool HasDiagnosticWork => this.query is not null || this.ownsPath || this.waitingForBackendCancellation;
+    internal string DiagnosticState => $"query={(this.query is { } task ? $"{task.Id}/{task.Status}" : "none")}; "
+        + $"ownsPath={this.ownsPath}; cancellationWait={this.waitingForBackendCancellation}; directGround={this.DirectGround}; lastFailure={this.LastFailure}";
     public bool DirectGround { get; set; }
     public TimeSpan QueryTimeout { get; set; } = TimeSpan.FromSeconds(30);
     public float MaximumPathLength { get; set; } = float.PositiveInfinity;

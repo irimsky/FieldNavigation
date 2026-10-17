@@ -8,7 +8,7 @@ namespace FieldNavigation;
 /// Typed, cancellable path calculation and explicit waypoint execution. This preserves a
 /// host's arrival, flight, target, and ownership rules without using SimpleMove's late execution.
 /// </summary>
-public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWaypointNavigationBackend, INavigationFailureInfo
+public sealed partial class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWaypointNavigationBackend, INavigationFailureInfo
 {
     private readonly IDalamudPluginInterface plugins;
     private readonly ICallGateSubscriber<Guid, List<Vector3>, bool, bool> moveOwned;
@@ -64,7 +64,11 @@ public sealed class VnavmeshWaypointIpc : IWaypointNavigationBackend, IOwnedWayp
     {
         cancellation.ThrowIfCancellationRequested();
         if (!Finite(origin) || !Finite(destination)) throw new ArgumentException("Navigation coordinates must be finite.");
-        return this.findPath.InvokeFunc(origin, destination, fly, cancellation);
+        // Correlate both candidate checks and executable routes at the shared IPC boundary.
+        long queryId = this.TraceQuerySubmit(origin, destination, fly);
+        var task = this.findPath.InvokeFunc(origin, destination, fly, cancellation);
+        this.TraceQueryLifetime(queryId, task, cancellation);
+        return task;
     }
 
     public void MovePath(List<Vector3> waypoints, bool fly)

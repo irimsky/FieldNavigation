@@ -17,7 +17,13 @@ public sealed class VnavmeshIpc : INavigationBackend, INavigationPump, INavigati
     public bool IsMoveActive => this.Paths.IsMoveActive;
     public bool DirectGround { get => this.Paths.DirectGround; set => this.Paths.DirectGround = value; }
     public bool MoveTo(Vector3 destination, bool fly) => this.Paths.MoveTo(destination, fly);
-    public void Stop() => this.Paths.Stop();
+    public void Stop()
+    {
+        bool traceCancellation = this.Paths.HasPendingQueryOrPath;
+        if (this.Paths.HasDiagnosticWork) this.Raw.TraceStop(this.Paths.DiagnosticState, true);
+        try { this.Paths.Stop(); }
+        finally { if (traceCancellation) this.Raw.TraceStopCompleted(this.Paths.DiagnosticState); }
+    }
     public void Pump(bool movementReady) => this.Paths.Pump(movementReady);
     public Vector3? FindNearestReachablePoint(Vector3 position, float halfExtentXZ = 20, float halfExtentY = 100)
     { try { return this.Paths.FindNearestReachablePoint(position, halfExtentXZ, halfExtentY); } catch { return null; } }

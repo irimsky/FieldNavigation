@@ -43,6 +43,8 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     {
         this.services = services; this.clock = clock ?? TimeProvider.System;
         navigation = services.SharedNavigation ?? new VnavmeshIpc(services.PluginInterface, () => services.Objects.LocalPlayer?.Position);
+        navigation.Raw.ConfigureDiagnostics(services.Log, () => active is null ? "operation=none"
+            : $"operation={active.Snapshot.OperationId}; phase={phase}; attempts={attempts}; recoveries={recoveries}; frameUtc={services.Framework.LastUpdateUTC:O}");
         mount = services.SharedMount ?? new MountAdapter(services.Condition, services.Objects, services.Log);
         descent = services.SharedLanding ?? new LandingAdapter(services.Interop);
         ownsDescent = services.SharedLanding is null;
@@ -100,6 +102,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     public void Tick()
     {
         AssertFramework(); if (disposed || Volatile.Read(ref disposalRequested) != 0) return;
+        navigation.Raw.PollDiagnostics(navigation.Paths.DiagnosticState);
         // Dispatch last tick's completions before processing new operations. New callback requests only run next tick.
         var current = active;
         while (notifications.TryDequeue(out var completed)) completed.Notify(ex => services.Log.Error(ex, "FN 完成通知异常"));
@@ -188,7 +191,11 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             {
                 phase = "Preparing"; message = "等待坐骑读条完成"; Publish(); return;
             }
-            if (journeyStarted) { exitReached |= journey.IntermediateWaypointReached; journey.Cancel("移动条件失效"); journeyStarted = false; }
+            if (journeyStarted)
+            {
+                Trace("cancel-movement-ready", $"operation={active.Snapshot.OperationId}; journey={journey.State}; casting={frame.Casting}; occupied={frame.Occupied}; combat={frame.InCombat}; jumping={frame.Travel.Flight.Jumping}; mountTransition={frame.Travel.Flight.MountTransition}; position={frame.Travel.Position}");
+                exitReached |= journey.IntermediateWaypointReached; journey.Cancel("移动条件失效"); journeyStarted = false;
+            }
             relocation?.Dispose(); relocation = null; jumpWaiting = false; recoveryMode = RecoveryMode.None;
             phase = "WaitingReady"; message = "等待施法/战斗/占用结束"; return;
         }
@@ -237,6 +244,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             Finish(OperationStatus.Succeeded, OperationReason.None, result.Reason); return;
         }
         if (result.Outcome != NavigationTravelOutcome.Failed) return;
+        Trace("journey-failed", $"operation={active.Snapshot.OperationId}; state={result.State}; reason={result.Reason}; failureStage={journey.LastFailureStage}; target={target}; candidate={candidate}; position={frame.Travel.Position}");
         bool movingStall = journey.LastFailureStage is NavigationFailureStage.GroundStall or NavigationFailureStage.FlightStall;
         if (!ConsumeRecovery()) return;
         journey.Cancel("导航恢复"); journeyStarted = false;
@@ -253,6 +261,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     private Vector3 lastRecoveryPosition;
     private void RejectCandidate(RuntimeFrame frame)
     {
+        Trace("reject-arrival", $"operation={active?.Snapshot.OperationId}; target={target}; candidate={candidate}; position={frame.Travel.Position}; distanceToTarget={Vector3.Distance(frame.Travel.Position, target)}; distanceToCandidate={Vector3.Distance(frame.Travel.Position, candidate)}; radius={navigate!.Arrival.Radius}; heightTolerance={navigate.Arrival.HeightTolerance}; use3D={navigate.Arrival.Use3DDistance}");
         if (!ConsumeRecovery()) return;
         journey.Cancel("导航恢复"); journeyStarted = false; rejected.Add(candidate); Replan();
     }
@@ -319,7 +328,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     }
     private void Publish(OperationStatus status = OperationStatus.Running, OperationReason reason = OperationReason.None)
     {
-        Trace("operation", $"status={status}; phase={phase}; reason={reason}; message={message}; attempts={attempts}; recoveries={recoveries}");
+        Trace("operation", $"operation={active?.Snapshot.OperationId}; status={status}; phase={phase}; reason={reason}; message={message}; attempts={attempts}; recoveries={recoveries}");
         active?.Publish(new(active.Snapshot.OperationId, status, phase, reason, message, attempts, recoveries,
             clock.GetElapsedTime(started), relocation?.Destination ?? (navigate is not null && attempts > 0 ? candidate : null), recoveryMode));
     }
@@ -411,6 +420,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             Release(() => journey.Cancel("释放导航", cancelMountCast: true));
             Release(navigation.Stop);
         }
+        Release(navigation.Raw.DetachDiagnostics);
         relocation = null; transferSession = null;
         notifications.Clear(); pendingFinish = null;
         if (ownsDescent) Release(descent.Dispose); // Never skip the hook if earlier cleanup failed.

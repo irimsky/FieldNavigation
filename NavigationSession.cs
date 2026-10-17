@@ -38,6 +38,8 @@ public sealed class NavigationSession<TPurpose>(INavigationBackend backend) wher
         // Path.Stop cannot cancel SimpleMove's calculation. Wait for its late result and stop it.
         if (!this.Operation.RequestIssued && backend.IsMoveActive)
         {
+            if (backend is VnavmeshIpc vnav)
+                vnav.Raw.TraceRequestWait($"stage=before-request; purpose={purpose}; generation={this.Operation.Generation}; requestIssued={this.Operation.RequestIssued}; cancellationPending={this.cancellationPending}; destination={destination}; fly={fly}; {vnav.Paths.DiagnosticState}");
             backend.Stop();
             return NavigationRequestResult.NotDue;
         }
