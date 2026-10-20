@@ -76,19 +76,21 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
             // 打向半空中的点会直接返回空路径，候选搜索就会把所有刷新点判成不可达。
             bool hasGround = navigation.TryResolveTravelGroundDestination(probe, true, out Vector3 groundFloor, out _);
             if (IsBlocked(position, hasGround ? groundFloor : probe)) fly = false;
-            if (fly)
+            bool probeOk = IsCandidateAcceptable(probe);
+            bool groundOk = hasGround && IsCandidateAcceptable(groundFloor);
+            if (fly && probeOk)
             {
-                if (!IsCandidateAcceptable(probe)) return false;
                 floor = probe;
-                if (hasGround && TravelGeometry.IsFinite(groundFloor)
-                    && Vector3.Distance(groundFloor, probe) > .01f
-                    && IsCandidateAcceptable(groundFloor))
+                if (groundOk && Vector3.Distance(groundFloor, probe) > .01f)
                     groundFallback = (groundFloor, true);
             }
-            else if (hasGround && IsCandidateAcceptable(groundFloor))
+            else if (groundOk)
             {
                 floor = groundFloor;
-                Message = "禁飞区或无法飞行：空中目标已降级为地面点";
+                Message = !probeOk
+                    ? "空中候选不可达，已改用对应地面点"
+                    : "禁飞区或无法飞行：空中目标已降级为地面点";
+                return StartQuery(position, floor, fly: false, forceGround: !probeOk, inFlight);
             }
             else
             {
