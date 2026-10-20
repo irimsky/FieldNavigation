@@ -1,4 +1,4 @@
-﻿using System.Numerics;
+using System.Numerics;
 
 namespace FieldNavigation;
 
@@ -43,26 +43,37 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
         if (navigation.Raw.IsMoveActive)
         { Message = "等待导航后端完成已有查询或路径"; return; }
         if (!probes.TryDequeue(out var probe)) { Exhausted = true; Message = "原目标范围内没有可达候选点"; return; }
-        Vector3 floor;
+        bool fly = request.Movement.AllowFlight && request.Movement.AllowMount && canFly
+            && request.Movement.Mode is not TravelMovementMode.Foot and not TravelMovementMode.GroundMount;
+        bool Blocked(Vector3 point) => !request.IgnoreNoFlyZones
+            && !zones.IsRouteExempt(territory, origin, point)
+            && (zones.Find(territory, position) is not null || zones.Find(territory, point) is not null);
         bool airborneGoal = !request.Arrival.RequireGrounded && !request.Arrival.RequireDismounted;
-        if (airborneGoal) floor = probe;
+        Vector3 floor;
+        if (airborneGoal)
+        {
+            // 禁飞区或当前无法飞行时，空中目标必须降级到它下方的地面点：地面寻路
+            // 打向半空中的点会直接返回空路径，候选搜索就会把所有刷新点判成不可达。
+            bool hasGround = navigation.TryResolveTravelGroundDestination(probe, true, out Vector3 groundFloor, out _);
+            if (Blocked(hasGround ? groundFloor : probe)) fly = false;
+            if (fly) floor = probe;
+            else if (hasGround) { floor = groundFloor; Message = "禁飞区或无法飞行：空中目标已降级为地面点"; }
+            else { Message = "禁飞区或无法飞行，且目标下方没有可解析的地面点"; return; }
+        }
         else if (request.GroundKind == GroundDestinationKind.MapWaypoint)
         {
             if (!navigation.TryResolveTravelGroundDestination(probe, true, out floor, out _)) return;
+            if (Blocked(floor)) fly = false;
         }
         else
         {
             var nearest = navigation.FindNearestReachablePoint(probe, .8f, Math.Min(5, request.Arrival.HeightTolerance));
             if (nearest is not { } resolved) return;
             floor = resolved;
+            if (Blocked(floor)) fly = false;
         }
         if (!TravelGeometry.IsFinite(floor) || !request.Arrival.Policy.Contains(floor, target)
             || rejected.Any(point => Vector3.Distance(point, floor) < Math.Min(2, request.Arrival.Radius * .3f))) return;
-        bool fly = request.Movement.AllowFlight && request.Movement.AllowMount && canFly
-            && request.Movement.Mode is not TravelMovementMode.Foot and not TravelMovementMode.GroundMount;
-        bool exempt = request.IgnoreNoFlyZones || zones.IsRouteExempt(territory, origin, floor);
-        if (!exempt && (zones.Find(territory, position) is not null || zones.Find(territory, floor) is not null)) fly = false;
-        if (Vector3.Distance(position, floor) < .5f) { Result = floor; return; }
         // Query the actual landing floor, not a point on an unrelated upper storey.
         pending = floor;
         cancellation = new(); queryStarted = clock.GetTimestamp();
