@@ -227,9 +227,11 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             search.Tick(frame.Travel.Position, frame.Travel.CanFly && !forceGround, frame.Travel.Flight.InFlight);
             phase = "SelectingDestination"; message = search.Message;
             if (search.Exhausted) { Finish(OperationStatus.Failed, OperationReason.NoPath, message); return; }
-            if (search.Result is not { } point) return;
-            candidate = point; search.Dispose(); search = null;
-            Trace("candidate", $"resolved={candidate}; requestedTarget={target}; inFlight={frame.Travel.Flight.InFlight}; forceGround={forceGround}");
+            if (search.Result is not { } selection) return;
+            candidate = selection.Point;
+            if (selection.ForceGround) forceGround = true;
+            search.Dispose(); search = null;
+            Trace("candidate", $"resolved={candidate}; requestedTarget={target}; inFlight={frame.Travel.Flight.InFlight}; forceGround={forceGround}; groundFallback={selection.ForceGround}");
             StartJourney(frame);
         }
         var observation = Observe(frame);
