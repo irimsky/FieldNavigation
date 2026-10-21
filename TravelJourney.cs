@@ -69,7 +69,7 @@ public sealed class TravelJourney : IDisposable
     private long started, phaseStarted;
     private long? settled;
     private Vector3 settleAnchor;
-    private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached, wasInFlight;
+    private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached, wasInFlight, groundLocked;
     private TravelMovementMode? combatDowngradeMode;
     private int mountRequests, replans, cancelRequested;
     private ulong character;
@@ -138,6 +138,10 @@ public sealed class TravelJourney : IDisposable
         this.combatDowngradeMode = null;
         this.selected = this.request.IntermediateWaypoint is not null && this.request.Movement.AllowMount && this.request.Movement.AllowFlight
             ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+        // A journey that already lost flight or committed to its final walk must not
+        // relaunch because a moving target or a height difference selects Fly again.
+        if (this.groundLocked && this.request.IntermediateWaypoint is null && this.selected == TravelMovementMode.Fly)
+            this.selected = this.request.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
         if (this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted)
         {
             if (this.selected != TravelMovementMode.Foot) this.combatDowngradeMode = this.selected;
@@ -192,16 +196,18 @@ public sealed class TravelJourney : IDisposable
                 TravelMovementMode previous = this.selected;
                 if (this.combatDowngradeMode is { } downgraded)
                 {
-                    this.selected = downgraded switch
-                    {
-                        TravelMovementMode.Fly when frame.CanFly => TravelMovementMode.Fly,
-                        TravelMovementMode.GroundMount => TravelMovementMode.GroundMount,
-                        _ when this.request.Movement.AllowMount => TravelMovementMode.GroundMount,
-                        _ => TravelMovementMode.Foot,
-                    };
                     this.combatDowngradeMode = null;
+                    if (!this.groundLocked)
+                        this.selected = downgraded switch
+                        {
+                            TravelMovementMode.Fly when frame.CanFly => TravelMovementMode.Fly,
+                            TravelMovementMode.GroundMount => TravelMovementMode.GroundMount,
+                            _ when this.request.Movement.AllowMount => TravelMovementMode.GroundMount,
+                            _ => TravelMovementMode.Foot,
+                        };
                 }
-                else if (this.request.Movement.Preferred != TravelMovementMode.Foot
+                else if (!this.groundLocked && !this.noFly.GroundOnly
+                    && this.request.Movement.Preferred != TravelMovementMode.Foot
                     && (this.selected == TravelMovementMode.Foot || this.selected == TravelMovementMode.GroundMount))
                 {
                     this.selected = this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
@@ -299,6 +305,7 @@ public sealed class TravelJourney : IDisposable
             }
             this.settled = null;
             this.State = TravelJourneyState.FinalApproach;
+            this.groundLocked = true;
             this.selected = TravelMovementMode.Foot;
             return this.Navigate(frame, this.approach, false, true);
         }
@@ -337,6 +344,7 @@ public sealed class TravelJourney : IDisposable
                 // pathfind/land loop; continue this journey on the ground instead.
                 this.travel.Cancel(); this.routeStarted = false;
                 this.movement.ResetTakeoff(); this.preparingTakeoff = false;
+                this.groundLocked = true;
                 this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
                 this.Change(TravelJourneyState.Travelling, "飞行意外结束，改用地面路线");
                 fly = false;
@@ -445,6 +453,7 @@ public sealed class TravelJourney : IDisposable
         this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
         this.intermediateDestination = null;
         this.combatDowngradeMode = null;
+        this.groundLocked = false;
         this.State = TravelJourneyState.Cancelled;
         this.reason = reason;
     }
