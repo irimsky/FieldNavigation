@@ -276,7 +276,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
     {
         if (frame.InCombat) { Finish(OperationStatus.Failed, OperationReason.MovementStalled, "战斗位移卡住，不强行跳跃或短移"); return; }
         if (frame.Travel.Flight.InFlight && !navigate!.IgnoreNoFlyZones
-            && zones.Find(frame.Travel.Territory, frame.Travel.Position) is not null
+            && zones.Find(frame.Travel.Territory, frame.Travel.Position, NoFlyZone.BoundaryMargin) is not null
             && !zones.IsRouteExempt(frame.Travel.Territory, operationOrigin, target) && navigate.Recovery.AllowGroundFallback)
         { forceGround = true; Replan(); return; }
         if (!navigate!.Recovery.AllowRelocation) { Finish(OperationStatus.Failed, OperationReason.MovementStalled, "未允许短移且跳跃恢复无效"); return; }

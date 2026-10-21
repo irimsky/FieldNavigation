@@ -69,7 +69,7 @@ public sealed class TravelJourney : IDisposable
     private long started, phaseStarted;
     private long? settled;
     private Vector3 settleAnchor;
-    private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached;
+    private bool routeStarted, ownsMount, preparingTakeoff, intermediateReached, wasInFlight;
     private TravelMovementMode? combatDowngradeMode;
     private int mountRequests, replans, cancelRequested;
     private ulong character;
@@ -131,7 +131,7 @@ public sealed class TravelJourney : IDisposable
     private void Plan(TravelObservation frame)
     {
         this.travel.Cancel(); this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff();
-        this.routeStarted = false; this.settled = null; this.preparingTakeoff = false;
+        this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.wasInFlight = false;
         this.approach = this.request!.ApproachPoint ?? (this.request.FindApproachPoint
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
@@ -155,6 +155,8 @@ public sealed class TravelJourney : IDisposable
         if (!frame.TargetValid || !TravelGeometry.IsFinite(frame.Position)
             || frame.Character != this.character || frame.Territory != this.territory)
             return this.Fail("目标、角色或区域已失效");
+        bool wasInFlight = this.wasInFlight;
+        this.wasInFlight = frame.Flight.InFlight;
         if (this.clock.GetElapsedTime(this.started) >= this.request.OperationTimeout) return this.Fail("本次前往总时间预算已耗尽");
         if (frame.TargetPosition is { } supplied && !TravelGeometry.IsFinite(supplied)) return this.Fail("目标坐标无效");
         if (frame.TargetPosition is { } fresh && Vector3.DistanceSquared(fresh, this.target) > 1)
@@ -328,18 +330,32 @@ public sealed class TravelJourney : IDisposable
         this.ownsMount = false;
         if (fly && !frame.Flight.InFlight)
         {
-            if (!this.preparingTakeoff)
+            if (wasInFlight && !this.IntermediateWaypointPending)
             {
-                // A ground leg may have used most of the operation budget before leaving
-                // a no-fly zone. Stop that leg and give takeoff its own bounded phase.
+                // An airborne leg ended without an intended landing. At a no-fly boundary
+                // vnavmesh silently stops the flight, so retaking off repeats the same
+                // pathfind/land loop; continue this journey on the ground instead.
                 this.travel.Cancel(); this.routeStarted = false;
-                this.movement.ResetTakeoff(); this.preparingTakeoff = true;
-                this.Change(TravelJourneyState.Preparing, "停止原路线，准备起飞");
+                this.movement.ResetTakeoff(); this.preparingTakeoff = false;
+                this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+                this.Change(TravelJourneyState.Travelling, "飞行意外结束，改用地面路线");
+                fly = false;
             }
-            if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
-                return this.Fail($"起飞超时：{this.movement.TakeoffStatus}");
-            this.movement.TryTakeoff(frame.Now);
-            return this.Update(NavigationTravelOutcome.Progress, $"等待实际起飞：{this.movement.TakeoffStatus}");
+            else
+            {
+                if (!this.preparingTakeoff)
+                {
+                    // A ground leg may have used most of the operation budget before leaving
+                    // a no-fly zone. Stop that leg and give takeoff its own bounded phase.
+                    this.travel.Cancel(); this.routeStarted = false;
+                    this.movement.ResetTakeoff(); this.preparingTakeoff = true;
+                    this.Change(TravelJourneyState.Preparing, "停止原路线，准备起飞");
+                }
+                if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
+                    return this.Fail($"起飞超时：{this.movement.TakeoffStatus}");
+                this.movement.TryTakeoff(frame.Now);
+                return this.Update(NavigationTravelOutcome.Progress, $"等待实际起飞：{this.movement.TakeoffStatus}");
+            }
         }
         this.preparingTakeoff = false;
         if (this.State == TravelJourneyState.Preparing) this.Change(TravelJourneyState.Travelling, "正在前往目标");

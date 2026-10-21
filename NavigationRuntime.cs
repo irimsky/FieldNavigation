@@ -41,7 +41,7 @@ internal sealed unsafe class NavigationRuntime(FieldNavigationHostServices servi
             ConditionFlag.OccupiedInCutSceneEvent, ConditionFlag.WatchingCutscene, ConditionFlag.Crafting, ConditionFlag.Gathering);
         bool dead = player?.IsDead == true || c[ConditionFlag.Unconscious];
         Vector3 position = player?.Position ?? Vector3.Zero;
-        var zone = valid && !loading ? zones.Find(services.ClientState.TerritoryType, position) : null;
+        var zone = valid && !loading ? zones.Find(services.ClientState.TerritoryType, position, NoFlyZone.BoundaryMargin) : null;
         var native = valid && !loading ? PlayerState.Instance() : null;
         bool combat = c[ConditionFlag.InCombat];
         bool mapAllowsMount = services.DataManager.GetExcelSheet<Lumina.Excel.Sheets.TerritoryType>()

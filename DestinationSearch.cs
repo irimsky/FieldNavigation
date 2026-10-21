@@ -75,7 +75,7 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
             // 禁飞区或当前无法飞行时，空中目标必须降级到它下方的地面点：地面寻路
             // 打向半空中的点会直接返回空路径，候选搜索就会把所有刷新点判成不可达。
             bool hasGround = navigation.TryResolveTravelGroundDestination(probe, true, out Vector3 groundFloor, out _);
-            if (IsBlocked(position, hasGround ? groundFloor : probe)) fly = false;
+            if (IsBlocked(position, hasGround ? groundFloor : probe, fly ? probe + Vector3.UnitY * request.FlightHeight : null)) fly = false;
             bool probeOk = IsCandidateAcceptable(probe);
             bool groundOk = hasGround && IsCandidateAcceptable(groundFloor);
             if (fly && probeOk)
@@ -102,20 +102,23 @@ internal sealed class DestinationSearch(VnavmeshIpc navigation, NoFlyZoneCatalog
         {
             if (!navigation.TryResolveTravelGroundDestination(probe, true, out floor, out _)
                 || !IsCandidateAcceptable(floor)) return false;
-            if (IsBlocked(position, floor)) fly = false;
+            if (IsBlocked(position, floor, fly ? floor + Vector3.UnitY * request.FlightHeight : null)) fly = false;
         }
         else
         {
             var nearest = navigation.FindNearestReachablePoint(probe, .8f, Math.Min(5, request.Arrival.HeightTolerance));
             if (nearest is not { } resolved || !IsCandidateAcceptable(resolved)) return false;
             floor = resolved;
-            if (IsBlocked(position, floor)) fly = false;
+            if (IsBlocked(position, floor, fly ? floor + Vector3.UnitY * request.FlightHeight : null)) fly = false;
         }
         return StartQuery(position, floor, fly, forceGround: false, inFlight);
     }
-    private bool IsBlocked(Vector3 position, Vector3 point) => !request.IgnoreNoFlyZones
-        && !zones.IsRouteExempt(territory, origin, point)
-        && (zones.Find(territory, position) is not null || zones.Find(territory, point) is not null);
+    private bool IsBlocked(Vector3 position, Vector3 point, Vector3? flightDestination) => !request.IgnoreNoFlyZones
+        && !zones.IsRouteExempt(territory, origin, flightDestination ?? point)
+        && (zones.Find(territory, position, NoFlyZone.BoundaryMargin) is not null
+            || zones.Find(territory, point, NoFlyZone.BoundaryMargin) is not null
+            || flightDestination is { } flight
+                && zones.FindRouteBlocking(territory, position, flight, NoFlyZone.BoundaryMargin) is not null);
     private bool IsCandidateAcceptable(Vector3 floor) => TravelGeometry.IsFinite(floor)
         && request.Arrival.Policy.Contains(floor, target)
         && !rejected.Any(point => Vector3.Distance(point, floor) < Math.Min(2, request.Arrival.Radius * .3f));

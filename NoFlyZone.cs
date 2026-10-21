@@ -25,10 +25,40 @@ public readonly record struct NoFlyZone(
     Vector3? LandingPoint = null,
     NoFlyRouteRule SpecialRules = NoFlyRouteRule.None)
 {
-    public bool Contains(Vector3 position) =>
-        MathF.Abs(position.X - this.Center.X) <= this.HalfExtents.X
-        && MathF.Abs(position.Y - this.Center.Y) <= this.HalfExtents.Y
-        && MathF.Abs(position.Z - this.Center.Z) <= this.HalfExtents.Z;
+    /// <summary>Boundary allowance so a character stopped just outside a no-fly border still counts as inside.</summary>
+    public const float BoundaryMargin = 2f;
+
+    public bool Contains(Vector3 position) => this.Contains(position, 0f);
+
+    public bool Contains(Vector3 position, float margin) =>
+        MathF.Abs(position.X - this.Center.X) <= this.HalfExtents.X + margin
+        && MathF.Abs(position.Y - this.Center.Y) <= this.HalfExtents.Y + margin
+        && MathF.Abs(position.Z - this.Center.Z) <= this.HalfExtents.Z + margin;
+
+    /// <summary>True when the padded volume touches the straight segment, even with both endpoints outside.</summary>
+    public bool IntersectsRoute(Vector3 origin, Vector3 destination, float margin = 0f)
+    {
+        if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination))
+            return false;
+        if (this.Contains(origin, margin) || this.Contains(destination, margin))
+            return true;
+        Vector3 min = this.Center - this.HalfExtents - new Vector3(margin);
+        Vector3 max = this.Center + this.HalfExtents + new Vector3(margin);
+        Vector3 direction = destination - origin;
+        float enter = 0f, exit = 1f;
+        return ClipAxis(origin.X, direction.X, min.X, max.X, ref enter, ref exit)
+            && ClipAxis(origin.Y, direction.Y, min.Y, max.Y, ref enter, ref exit)
+            && ClipAxis(origin.Z, direction.Z, min.Z, max.Z, ref enter, ref exit);
+
+        static bool ClipAxis(float start, float delta, float min, float max, ref float enter, ref float exit)
+        {
+            if (MathF.Abs(delta) < 1e-6f) return start >= min && start <= max;
+            float first = (min - start) / delta, second = (max - start) / delta;
+            if (first > second) (first, second) = (second, first);
+            enter = MathF.Max(enter, first); exit = MathF.Min(exit, second);
+            return enter <= exit;
+        }
+    }
 
     public bool IsRouteExempt(bool originInside, bool destinationInside)
     {
@@ -91,14 +121,34 @@ public sealed class NoFlyZoneCatalog(
         (flightExitZones ?? defaultFlightExitZones).ToArray();
     private readonly Dictionary<uint, IReadOnlyList<NoFlyZone>> cache = [];
 
-    public NoFlyZone? Find(uint territoryId, Vector3 position)
+    public NoFlyZone? Find(uint territoryId, Vector3 position) => this.Find(territoryId, position, 0f);
+
+    public NoFlyZone? Find(uint territoryId, Vector3 position, float margin)
     {
         if (!this.cache.TryGetValue(territoryId, out var zones))
             this.cache[territoryId] = zones = this.Load(territoryId);
         foreach (NoFlyZone zone in zones)
         {
-            if (zone.Contains(position))
+            if (zone.Contains(position, margin))
                 return zone;
+        }
+
+        return null;
+    }
+
+    /// <summary>Returns a no-fly zone touched by the padded straight route unless that route is exempt.</summary>
+    public NoFlyZone? FindRouteBlocking(uint territoryId, Vector3 origin, Vector3 destination, float margin = 0f)
+    {
+        if (!this.cache.TryGetValue(territoryId, out var zones))
+            this.cache[territoryId] = zones = this.Load(territoryId);
+        foreach (NoFlyZone zone in zones)
+        {
+            bool originInside = zone.Contains(origin, margin);
+            bool destinationInside = zone.Contains(destination, margin);
+            if (!zone.IntersectsRoute(origin, destination, margin)
+                || zone.IsRouteExempt(originInside, destinationInside))
+                continue;
+            return zone;
         }
 
         return null;
