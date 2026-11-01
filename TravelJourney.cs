@@ -14,8 +14,8 @@ public sealed record TravelRequest
     public required Vector3 Destination { get; init; }
     /// <summary>Required airborne checkpoint used before continuing to Destination.</summary>
     public Vector3? IntermediateWaypoint { get; init; }
-    /// <summary>Resolve a horizontal map waypoint's floor and retain at least the current flight altitude.</summary>
-    public bool IntermediateWaypointIsMapCoordinate { get; init; }
+    /// <summary>Resolve the floor under a horizontal point (X/Z with placeholder Y) and retain at least the current flight altitude.</summary>
+    public bool IntermediateWaypointNeedsFloor { get; init; }
     public float IntermediateWaypointRadius { get; init; } = 3;
     public TravelModePolicy Movement { get; init; } = new();
     public TravelArrivalPolicy Arrival { get; init; } = new();
@@ -225,7 +225,7 @@ public sealed class TravelJourney : IDisposable
             if (this.intermediateDestination is null)
             {
                 Vector3 waypoint = this.request.IntermediateWaypoint!.Value;
-                if (this.request.IntermediateWaypointIsMapCoordinate)
+                if (this.request.IntermediateWaypointNeedsFloor)
                 {
                     if (!this.backend.TryResolveTravelGroundDestination(waypoint, mapWaypoint: true, out var floor, out _)
                         || !TravelGeometry.IsFinite(floor))

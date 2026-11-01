@@ -6,6 +6,7 @@ using Lumina.Excel.Sheets;
 
 namespace FieldNavigation;
 
+/// <summary>Which route categories a no-fly definition handles specially.</summary>
 [Flags]
 public enum NoFlyRouteRule
 {
@@ -13,16 +14,36 @@ public enum NoFlyRouteRule
     InsideToInside = 1 << 0,
     InsideToOutside = 1 << 1,
     OutsideToInside = 1 << 2,
+    OutsideToOutside = 1 << 3,
 }
 
-/// <summary>A map volume where travel must use ground navigation.</summary>
-/// <remarks>The optional landing point stores world X/Z with a placeholder Y; landing resolves its floor.</remarks>
+/// <summary>A rectangular area defined by two in-game map coordinates (X, Y).</summary>
+public readonly record struct NoFlyMapRectangle(Vector2 FirstMapCoordinate, Vector2 SecondMapCoordinate);
+
+/// <summary>
+/// One no-fly configuration. The area is the union of its <see cref="Rectangles"/> and the volumes
+/// resolved from <see cref="PlaceNameIds"/>: being inside any of them means being inside the zone.
+/// </summary>
+/// <param name="RouteRule">Route categories that do not force a landing. Other categories use ground navigation.</param>
+/// <param name="TransferPoint">
+/// World X/Z with a placeholder Y. Exempt routes that cross the boundary fly through this point first;
+/// routes that are not exempt land on it before continuing on the ground. Null lets the navigator choose.
+/// </param>
+public sealed record NoFlyZoneDefinition(
+    uint TerritoryId,
+    string Name,
+    IReadOnlyList<NoFlyMapRectangle> Rectangles,
+    IReadOnlyList<uint> PlaceNameIds,
+    NoFlyRouteRule RouteRule = NoFlyRouteRule.None,
+    Vector3? TransferPoint = null);
+
+/// <summary>A resolved no-fly volume in world space.</summary>
 public readonly record struct NoFlyZone(
     uint TerritoryId,
     Vector3 Center,
     Vector3 HalfExtents,
     string Name,
-    Vector3? LandingPoint = null,
+    Vector3? TransferPoint = null,
     NoFlyRouteRule SpecialRules = NoFlyRouteRule.None)
 {
     /// <summary>Boundary allowance so a character stopped just outside a no-fly border still counts as inside.</summary>
@@ -60,74 +81,45 @@ public readonly record struct NoFlyZone(
         }
     }
 
-    public bool IsRouteExempt(bool originInside, bool destinationInside)
-    {
-        if (!originInside && !destinationInside)
-            return false;
-        NoFlyRouteRule route = originInside
+    /// <summary>Route category of a straight segment, based on where its endpoints sit relative to this volume.</summary>
+    public static NoFlyRouteRule Route(bool originInside, bool destinationInside) =>
+        originInside
             ? destinationInside ? NoFlyRouteRule.InsideToInside : NoFlyRouteRule.InsideToOutside
-            : NoFlyRouteRule.OutsideToInside;
-        return (this.SpecialRules & route) != 0;
-    }
+            : destinationInside ? NoFlyRouteRule.OutsideToInside : NoFlyRouteRule.OutsideToOutside;
+
+    public bool IsRouteExempt(bool originInside, bool destinationInside) =>
+        (this.SpecialRules & Route(originInside, destinationInside)) != 0;
 }
-
-/// <summary>A rectangular no-fly area defined by two in-game map coordinates (X, Y).</summary>
-public readonly record struct NoFlyMapRectangle(
-    uint TerritoryId,
-    Vector2 FirstMapCoordinate,
-    Vector2 SecondMapCoordinate,
-    string Name,
-    Vector2? LandingMapCoordinate = null,
-    NoFlyRouteRule SpecialRules = NoFlyRouteRule.None);
-
-/// <summary>A map rectangle whose configured boundary crossings must pass through a fixed airborne waypoint.</summary>
-public readonly record struct FlightExitZone(
-    uint TerritoryId,
-    Vector2 FirstMapCoordinate,
-    Vector2 SecondMapCoordinate,
-    Vector2 ExitWaypointMapCoordinate,
-    string Name,
-    NoFlyRouteRule Routes = NoFlyRouteRule.InsideToOutside);
 
 public sealed class NoFlyZoneCatalog(
     IDataManager dataManager,
-    IEnumerable<uint>? placeNameIds = null,
-    IEnumerable<NoFlyMapRectangle>? mapRectangles = null,
-    IEnumerable<FlightExitZone>? flightExitZones = null)
+    IEnumerable<NoFlyZoneDefinition>? definitions = null)
 {
-    // Only IDs are configured. Geometry is read from planmap.lgb at runtime.
-    private static readonly uint[] defaultPlaceNameIds =
-    {
-        // PlaceNameId 238：拉诺西亚外地 · 武伽玛罗武装矿山（Territory 180）
-        238,
-    };
-    private static readonly NoFlyMapRectangle[] defaultMapRectangles =
-    {
-        // 试验区域：南萨纳兰 (27.4, 21.5) 到 (36.2, 17.2)，指定平面落点 (27.4, 20.9)。
-        new(146, new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f),
-            "试验矩形禁飞区·南萨纳兰", new Vector2(27.4f, 20.9f)),
-    };
-    private static readonly FlightExitZone[] defaultFlightExitZones =
-    {
-        // 叹息海进出中转：内到外及外到内均先经过地图坐标 (21.8, 18.5)。
-        new(959, new Vector2(4.2f, 17.5f), new Vector2(39.2f, 4.1f),
-            new Vector2(21.8f, 18.5f), "飞行进出中转·叹息海",
-            NoFlyRouteRule.InsideToOutside | NoFlyRouteRule.OutsideToInside),
-    };
-    private readonly HashSet<uint> placeNameIds = new(placeNameIds ?? defaultPlaceNameIds);
-    private readonly IReadOnlyList<NoFlyMapRectangle> mapRectangles =
-        (mapRectangles ?? defaultMapRectangles).ToArray();
-    private readonly IReadOnlyList<FlightExitZone> flightExitZones =
-        (flightExitZones ?? defaultFlightExitZones).ToArray();
+    // Rectangles are authored in map coordinates; transfer points are world coordinates.
+    private static readonly NoFlyZoneDefinition[] defaultDefinitions =
+    [
+        // PlaceNameId 238：拉诺西亚外地 · 武伽玛罗武装矿山（Territory 180），几何运行时从 planmap.lgb 读取。
+        new(180, "武伽玛罗武装矿山", [], [238]),
+        // 试验区域：地图坐标 (27.4, 21.5) 到 (36.2, 17.2)；落点地图坐标 (27.4, 20.9) = 世界 (296, 0, -29)。
+        new(146, "试验矩形禁飞区·南萨纳兰",
+            [new(new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f))],
+            [], NoFlyRouteRule.None, new Vector3(296f, 0f, -29f)),
+        // 叹息海进出中转：跨边界先经过地图坐标 (21.8, 18.5) = 世界 (16, 0, -149)，区内飞行不强制落地。
+        new(959, "飞行进出中转·叹息海",
+            [new(new Vector2(4.2f, 17.5f), new Vector2(39.2f, 4.1f))],
+            [], NoFlyRouteRule.InsideToInside | NoFlyRouteRule.InsideToOutside
+                | NoFlyRouteRule.OutsideToInside | NoFlyRouteRule.OutsideToOutside,
+            new Vector3(16f, 0f, -149f)),
+    ];
+    private readonly IReadOnlyList<NoFlyZoneDefinition> definitions =
+        (definitions ?? defaultDefinitions).ToArray();
     private readonly Dictionary<uint, IReadOnlyList<NoFlyZone>> cache = [];
 
     public NoFlyZone? Find(uint territoryId, Vector3 position) => this.Find(territoryId, position, 0f);
 
     public NoFlyZone? Find(uint territoryId, Vector3 position, float margin)
     {
-        if (!this.cache.TryGetValue(territoryId, out var zones))
-            this.cache[territoryId] = zones = this.Load(territoryId);
-        foreach (NoFlyZone zone in zones)
+        foreach (NoFlyZone zone in this.Load(territoryId))
         {
             if (zone.Contains(position, margin))
                 return zone;
@@ -139,14 +131,10 @@ public sealed class NoFlyZoneCatalog(
     /// <summary>Returns a no-fly zone touched by the padded straight route unless that route is exempt.</summary>
     public NoFlyZone? FindRouteBlocking(uint territoryId, Vector3 origin, Vector3 destination, float margin = 0f)
     {
-        if (!this.cache.TryGetValue(territoryId, out var zones))
-            this.cache[territoryId] = zones = this.Load(territoryId);
-        foreach (NoFlyZone zone in zones)
+        foreach (NoFlyZone zone in this.Load(territoryId))
         {
-            bool originInside = zone.Contains(origin, margin);
-            bool destinationInside = zone.Contains(destination, margin);
             if (!zone.IntersectsRoute(origin, destination, margin)
-                || zone.IsRouteExempt(originInside, destinationInside))
+                || zone.IsRouteExempt(zone.Contains(origin, margin), zone.Contains(destination, margin)))
                 continue;
             return zone;
         }
@@ -157,84 +145,92 @@ public sealed class NoFlyZoneCatalog(
     /// <summary>Returns whether every no-fly zone touched by this route grants a special exemption.</summary>
     public bool IsRouteExempt(uint territoryId, Vector3 origin, Vector3 destination)
     {
-        bool matched = false;
         foreach (NoFlyZone zone in this.Load(territoryId))
         {
-            bool originInside = zone.Contains(origin);
-            bool destinationInside = zone.Contains(destination);
-            if (!originInside && !destinationInside)
+            if (!zone.IntersectsRoute(origin, destination))
                 continue;
-            matched = true;
-            if (!zone.IsRouteExempt(originInside, destinationInside))
+            if (!zone.IsRouteExempt(zone.Contains(origin), zone.Contains(destination)))
                 return false;
         }
 
-        return matched;
+        return true;
     }
 
+    /// <summary>
+    /// Returns the transfer point of the boundary this flight route is about to cross,
+    /// or null when the route needs no airborne transfer.
+    /// </summary>
     public Vector3? FindFlightExitWaypoint(uint territoryId, Vector3 origin, Vector3 destination)
     {
-        if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination)
-            || !this.flightExitZones.Any(zone => zone.TerritoryId == territoryId))
+        if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination))
             return null;
-        var map = this.GetMap(territoryId);
-        if (map is not { } mapRow || mapRow.SizeFactor == 0)
-            return null;
-        foreach (FlightExitZone zone in this.flightExitZones.Where(zone => zone.TerritoryId == territoryId))
+        foreach (NoFlyZone zone in this.Load(territoryId))
         {
-            Vector3 first = ConvertMapCoordinate(mapRow, zone.FirstMapCoordinate);
-            Vector3 second = ConvertMapCoordinate(mapRow, zone.SecondMapCoordinate);
-            Vector3 min = Vector3.Min(first, second);
-            Vector3 max = Vector3.Max(first, second);
-            bool originInside = origin.X >= min.X && origin.X <= max.X && origin.Z >= min.Z && origin.Z <= max.Z;
-            bool destinationInside = destination.X >= min.X && destination.X <= max.X && destination.Z >= min.Z && destination.Z <= max.Z;
-            NoFlyRouteRule route = originInside
-                ? destinationInside ? NoFlyRouteRule.InsideToInside : NoFlyRouteRule.InsideToOutside
-                : destinationInside ? NoFlyRouteRule.OutsideToInside : NoFlyRouteRule.None;
-            if (route != NoFlyRouteRule.None && (zone.Routes & route) != 0)
-                return ConvertMapCoordinate(mapRow, zone.ExitWaypointMapCoordinate);
+            if (zone.TransferPoint is not { } waypoint || zone.SpecialRules == NoFlyRouteRule.None)
+                continue;
+            if (!zone.IntersectsRoute(origin, destination))
+                continue;
+            NoFlyRouteRule route = NoFlyZone.Route(zone.Contains(origin), zone.Contains(destination));
+            // Moving within a zone or passing by it is not a boundary crossing, so it needs no transfer.
+            if (route is NoFlyRouteRule.InsideToInside or NoFlyRouteRule.OutsideToOutside)
+                continue;
+            if ((zone.SpecialRules & route) != 0)
+                return waypoint;
         }
+
         return null;
     }
 
     public IReadOnlyList<NoFlyZone> Load(uint territoryId)
     {
-        var territory = dataManager.GetExcelSheet<TerritoryType>()!.GetRowOrDefault(territoryId);
-        if (territory is not { } row)
-            return [];
+        if (this.cache.TryGetValue(territoryId, out IReadOnlyList<NoFlyZone>? cached))
+            return cached;
         List<NoFlyZone> zones = [];
+        Map? map = this.GetMap(territoryId);
+        foreach (NoFlyZoneDefinition definition in this.definitions)
+        {
+            if (definition.TerritoryId != territoryId)
+                continue;
+            if (definition.PlaceNameIds.Count > 0)
+                zones.AddRange(this.LoadPlaceNameZones(definition));
+            if (definition.Rectangles.Count == 0 || map is not { } mapRow || mapRow.SizeFactor == 0)
+                continue;
+            foreach (NoFlyMapRectangle rectangle in definition.Rectangles)
+                zones.Add(CreateMapRectangleZone(definition, rectangle, mapRow));
+        }
+
+        this.cache[territoryId] = zones;
+        return zones;
+    }
+
+    private IEnumerable<NoFlyZone> LoadPlaceNameZones(NoFlyZoneDefinition definition)
+    {
+        var territory = dataManager.GetExcelSheet<TerritoryType>()!.GetRowOrDefault(definition.TerritoryId);
+        if (territory is not { } row)
+            yield break;
         string bg = row.Bg.ToString();
         int level = bg.LastIndexOf("/level/", StringComparison.Ordinal);
-        if (level >= 0)
+        if (level < 0)
+            yield break;
+        string directory = bg[..(level + "/level/".Length)];
+        var file = dataManager.GetFile<LgbFile>($"bg/{directory}planmap.lgb");
+        if (file is null)
+            yield break;
+        var names = dataManager.GetExcelSheet<PlaceName>()!;
+        foreach (var instance in file.Layers.SelectMany(layer => layer.InstanceObjects))
         {
-            string directory = bg[..(level + "/level/".Length)];
-            var file = dataManager.GetFile<LgbFile>($"bg/{directory}planmap.lgb");
-            if (file is not null)
-            {
-                var names = dataManager.GetExcelSheet<PlaceName>()!;
-                zones.AddRange(file.Layers.SelectMany(layer => layer.InstanceObjects)
-                    .Where(instance => instance.Object is LayerCommon.MapRangeInstanceObject range
-                                       && this.placeNameIds.Contains(range.PlaceNameBlock))
-                    .Select(instance =>
-                    {
-                        var range = (LayerCommon.MapRangeInstanceObject)instance.Object!;
-                        uint id = range.PlaceNameBlock;
-                        return new NoFlyZone(territoryId,
-                            new Vector3(instance.Transform.Translation.X, instance.Transform.Translation.Y, instance.Transform.Translation.Z),
-                            new Vector3(instance.Transform.Scale.X, instance.Transform.Scale.Y, instance.Transform.Scale.Z),
-                            names.GetRowOrDefault(id)?.Name.ToString() ?? $"PlaceName {id}");
-                    }));
-            }
+            if (instance.Object is not LayerCommon.MapRangeInstanceObject range
+                || !definition.PlaceNameIds.Contains(range.PlaceNameBlock))
+                continue;
+            yield return new NoFlyZone(definition.TerritoryId,
+                new Vector3(instance.Transform.Translation.X, instance.Transform.Translation.Y, instance.Transform.Translation.Z),
+                new Vector3(instance.Transform.Scale.X, instance.Transform.Scale.Y, instance.Transform.Scale.Z),
+                string.IsNullOrEmpty(definition.Name)
+                    ? names.GetRowOrDefault(range.PlaceNameBlock)?.Name.ToString() ?? $"PlaceName {range.PlaceNameBlock}"
+                    : definition.Name,
+                definition.TransferPoint,
+                definition.RouteRule);
         }
-
-        var map = this.GetMap(territoryId);
-        if (map is { } mapRow && mapRow.SizeFactor != 0)
-        {
-            foreach (NoFlyMapRectangle rectangle in this.mapRectangles.Where(rectangle => rectangle.TerritoryId == territoryId))
-                zones.Add(CreateMapRectangleZone(rectangle, mapRow));
-        }
-
-        return zones;
     }
 
     private Map? GetMap(uint territoryId)
@@ -243,22 +239,22 @@ public sealed class NoFlyZoneCatalog(
         return territory is { } row ? dataManager.GetExcelSheet<Map>()?.GetRowOrDefault(row.Map.RowId) : null;
     }
 
-    public static NoFlyZone CreateMapRectangleZone(NoFlyMapRectangle rectangle, Map map)
+    public static NoFlyZone CreateMapRectangleZone(
+        NoFlyZoneDefinition definition,
+        NoFlyMapRectangle rectangle,
+        Map map)
     {
         Vector3 first = ConvertMapCoordinate(map, rectangle.FirstMapCoordinate);
         Vector3 second = ConvertMapCoordinate(map, rectangle.SecondMapCoordinate);
         Vector3 min = Vector3.Min(first, second);
         Vector3 max = Vector3.Max(first, second);
-        Vector3? landingPoint = rectangle.LandingMapCoordinate is { } landingCoordinate
-            ? ConvertMapCoordinate(map, landingCoordinate)
-            : null;
         return new(
-            rectangle.TerritoryId,
+            definition.TerritoryId,
             new Vector3((min.X + max.X) * 0.5f, 0f, (min.Z + max.Z) * 0.5f),
             new Vector3((max.X - min.X) * 0.5f, float.MaxValue, (max.Z - min.Z) * 0.5f),
-            rectangle.Name,
-            landingPoint,
-            rectangle.SpecialRules);
+            definition.Name,
+            definition.TransferPoint,
+            definition.RouteRule);
     }
 
     public static Vector3 ConvertMapCoordinate(Map map, Vector2 coordinate) => new(

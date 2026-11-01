@@ -318,7 +318,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
                 AllowDuringCombat = request.Movement.AllowDuringCombat },
             Arrival = request.Arrival.Policy,
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
-            IntermediateWaypoint = waypoint, IntermediateWaypointIsMapCoordinate = true,
+            IntermediateWaypoint = waypoint, IntermediateWaypointNeedsFloor = true,
             OperationTimeout = request.Recovery.TotalTimeout - clock.GetElapsedTime(started),
             StallTimeout = request.Recovery.StallTimeout, StopOnStall = true,
         }, observation);
