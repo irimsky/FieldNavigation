@@ -65,6 +65,14 @@ public sealed class NoFlyTravelPolicy
         }
     }
 
+    /// <summary>Marks a configured transfer point as crossed and releases the one-second boundary debounce.</summary>
+    public void ClearGroundLock()
+    {
+        this.initialized = true;
+        this.enteredAt = this.leftAt = null;
+        this.GroundOnly = false;
+    }
+
     public void Reset()
     {
         this.initialized = false;

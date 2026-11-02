@@ -146,7 +146,7 @@ public sealed class TravelJourney : IDisposable
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
         this.combatDowngradeMode = null;
-        this.noFlyExempt = frame.NoFlyExempt;
+        this.noFlyExempt = this.intermediateReached || frame.NoFlyExempt;
         this.intermediateDestination = null;
         this.intermediateFloor = null;
         this.intermediateDestinationAirborne = false;
@@ -314,9 +314,7 @@ public sealed class TravelJourney : IDisposable
             this.landing.Reset();
             if (this.HasPendingTransfer)
             {
-                this.intermediateReached = true;
-                this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
-                this.Change(TravelJourneyState.Travelling, "已在中转点落地，改走地面前往目标");
+                this.CompleteTransfer(frame);
                 this.Pump(true);
                 return this.Update(NavigationTravelOutcome.Progress, this.reason);
             }
@@ -458,14 +456,7 @@ public sealed class TravelJourney : IDisposable
             this.routeStarted = false;
             if (intermediate)
             {
-                if (fly && frame.Flight.InFlight && !this.noFlyExempt)
-                {
-                    this.travel.Cancel(); this.routeStarted = false; this.landing.Reset();
-                    this.Change(TravelJourneyState.Landing, "已飞到离区中转点，落地后步行");
-                    return this.Update(NavigationTravelOutcome.Progress, this.reason);
-                }
-                this.intermediateReached = true;
-                this.Change(TravelJourneyState.Travelling, "已到达离区中转点，继续前往原目标");
+                this.CompleteTransfer(frame);
                 this.Pump(true);
                 return this.Update(NavigationTravelOutcome.Progress, this.reason);
             }
@@ -484,6 +475,17 @@ public sealed class TravelJourney : IDisposable
     private bool CanUseTransfer(TravelObservation frame) =>
         frame.CanFly && !this.groundLocked && this.request!.Movement.AllowMount && this.request.Movement.AllowFlight
         && !(this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted && !frame.Flight.InFlight);
+
+    /// <summary>Reaching a configured transfer point releases the zone rules for the remainder of this journey.</summary>
+    private void CompleteTransfer(TravelObservation frame)
+    {
+        this.intermediateReached = true;
+        this.noFlyExempt = true;
+        this.noFly.ClearGroundLock();
+        this.selected = frame.CanFly ? TravelMovementMode.Fly
+            : this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+        this.Change(TravelJourneyState.Travelling, "已到达中转点，后续忽略禁飞区");
+    }
 
     private void AbandonIntermediateWaypoint(TravelObservation frame)
     {
