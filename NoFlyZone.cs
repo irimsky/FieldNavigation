@@ -108,8 +108,11 @@ public sealed class NoFlyZoneCatalog(
     // Rectangles are authored in map coordinates; transfer points are world coordinates.
     private static readonly NoFlyZoneDefinition[] defaultDefinitions =
     [
-        // PlaceNameId 238：拉诺西亚外地 · 武伽玛罗武装矿山（Territory 180），几何运行时从 planmap.lgb 读取。
-        new(180, "武伽玛罗武装矿山", [], [238]),
+        // 武伽玛罗武装矿山（Territory 180）：地图坐标 (20.4, 11.0) 到 (28.7, 4.3)。
+        // 跨边界中转：世界坐标 (115.422, 27.377, -594.416)，约合地图坐标 (23.79, 9.59)。
+        new(180, "武伽玛罗武装矿山",
+            [new(new Vector2(20.4f, 11.0f), new Vector2(28.7f, 4.3f))],
+            [], NoFlyRouteRule.None, new Vector3(115.422f, 27.377f, -594.416f)),
         // 试验区域：地图坐标 (27.4, 21.5) 到 (36.2, 17.2)；落点地图坐标 (27.4, 20.9) = 世界 (296, 0, -29)。
         new(146, "试验矩形禁飞区·南萨纳兰",
             [new(new Vector2(27.4f, 21.5f), new Vector2(36.2f, 17.2f))],
