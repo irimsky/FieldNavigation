@@ -290,13 +290,13 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         CanFly = frame.Travel.CanFly && navigate.Movement.AllowFlight && navigate.Movement.AllowMount && !forceGround,
     };
     /// <summary>
-    /// Transfer points belong to flight planning. Only a journey explicitly planned end-to-end on the
-    /// ground skips them; temporary footing from combat, a missing mount or lost flight does not.
+    /// Transfer points are used only for journeys that can actually fly. Ground-only requests and
+    /// journeys temporarily forced onto the ground skip them instead of making a ground detour.
     /// </summary>
     public static bool PlansTransferPoint(
-        TravelMovementMode requestedMode, bool ignoreNoFlyZones, bool exitReached) =>
-        !exitReached && !ignoreNoFlyZones
-        && requestedMode is not (TravelMovementMode.Foot or TravelMovementMode.GroundMount);
+        TravelMovementMode mode, bool ignoreNoFlyZones, bool exitReached, bool canFly) =>
+        !exitReached && !ignoreNoFlyZones && canFly
+        && mode is TravelMovementMode.Automatic or TravelMovementMode.Fly;
 
     private void StartJourney(RuntimeFrame frame)
     {
@@ -311,10 +311,10 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         var observation = Observe(frame);
         bool combatFootDowngrade = request.Movement.AllowDuringCombat && frame.InCombat
             && frame.Travel.Dismounted && !frame.Travel.Flight.InFlight;
-        // Boundary crossings visit the transfer point whenever the original plan involved flight,
-        // even if the character is temporarily grounded. The journey decides whether that leg is
-        // flown or walked; only an explicitly ground-only journey skips the transfer point.
-        Vector3? waypoint = PlansTransferPoint(request.Movement.Mode, request.IgnoreNoFlyZones, exitReached)
+        // Transfer points are flight-only checkpoints. Ground-only journeys and journeys currently
+        // unable to fly navigate directly instead of detouring to a transfer point on foot.
+        bool canFlyNow = observation.CanFly && mountAllowed && !combatFootDowngrade;
+        Vector3? waypoint = PlansTransferPoint(mode, request.IgnoreNoFlyZones, exitReached, canFlyNow)
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;

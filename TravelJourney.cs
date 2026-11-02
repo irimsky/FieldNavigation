@@ -126,6 +126,11 @@ public sealed class TravelJourney : IDisposable
         this.target = request.Destination;
         this.intermediateReached = false;
         this.combatDowngradeMode = null;
+        if (this.request!.IntermediateWaypoint is not null && !this.CanUseTransfer(observation))
+        {
+            this.request = this.request! with { IntermediateWaypoint = null, IntermediateWaypointNeedsFloor = false };
+            this.groundLocked = true;
+        }
         this.noFly.Begin(observation.Now, observation.InsideNoFly && !this.noFlyExempt);
         this.Plan(observation);
     }
@@ -232,6 +237,8 @@ public sealed class TravelJourney : IDisposable
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
         if (!frame.CanFly && this.selected == TravelMovementMode.Fly)
             this.selected = this.request.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+        if (this.IntermediateWaypointPending && !this.CanUseTransfer(frame))
+            this.AbandonIntermediateWaypoint(frame);
         bool intermediate = this.IntermediateWaypointPending;
         if (intermediate)
         {
@@ -363,7 +370,7 @@ public sealed class TravelJourney : IDisposable
         this.ownsMount = false;
         if (fly && !frame.Flight.InFlight)
         {
-            if (wasInFlight && !this.IntermediateWaypointPending)
+            if (wasInFlight)
             {
                 // An airborne leg ended without an intended landing. At a no-fly boundary
                 // vnavmesh silently stops the flight, so retaking off repeats the same
@@ -372,7 +379,11 @@ public sealed class TravelJourney : IDisposable
                 this.movement.ResetTakeoff(); this.preparingTakeoff = false;
                 this.groundLocked = true;
                 this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
-                this.Change(TravelJourneyState.Travelling, "飞行意外结束，改用地面路线");
+                // A transfer point is a flight checkpoint. Once this journey falls back to the
+                // ground there is no reason to walk to it; go straight for the destination.
+                this.request = this.request! with { IntermediateWaypoint = null, IntermediateWaypointNeedsFloor = false };
+                this.Change(TravelJourneyState.Travelling, "飞行意外结束，跳过中转点并改走地面路线");
+                intermediate = this.IntermediateWaypointPending;
                 fly = false;
             }
             else
@@ -445,6 +456,22 @@ public sealed class TravelJourney : IDisposable
         }
         this.Pump(true);
         return this.Update(NavigationTravelOutcome.Progress, result.Reason);
+    }
+
+    /// <summary>
+    /// A transfer point is a flight checkpoint. It is not a ground detour, so a journey that cannot
+    /// currently fly must navigate directly to its destination instead.
+    /// </summary>
+    private bool CanUseTransfer(TravelObservation frame) =>
+        frame.CanFly && !this.groundLocked && this.request!.Movement.AllowMount && this.request.Movement.AllowFlight
+        && !(this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted && !frame.Flight.InFlight);
+
+    private void AbandonIntermediateWaypoint(TravelObservation frame)
+    {
+        this.request = this.request! with { IntermediateWaypoint = null, IntermediateWaypointNeedsFloor = false };
+        this.groundLocked = true;
+        this.Plan(frame);
+        this.Change(TravelJourneyState.Preparing, "当前无法飞行，跳过中转点并改走地面路线");
     }
 
     private bool ContainsGoal(Vector3 position) => (this.request!.IntermediateWaypoint is null || this.intermediateReached)
