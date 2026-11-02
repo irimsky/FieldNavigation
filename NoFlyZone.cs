@@ -39,13 +39,18 @@ public sealed record NoFlyZoneDefinition(
     Vector3? TransferPoint = null);
 
 /// <summary>A resolved no-fly volume in world space.</summary>
+/// <param name="DefinitionGroup">
+/// Resolved volumes from the same configured definition share a group so route categories use their union.
+/// Negative values keep a standalone volume independent.
+/// </param>
 public readonly record struct NoFlyZone(
     uint TerritoryId,
     Vector3 Center,
     Vector3 HalfExtents,
     string Name,
     Vector3? TransferPoint = null,
-    NoFlyRouteRule SpecialRules = NoFlyRouteRule.None)
+    NoFlyRouteRule SpecialRules = NoFlyRouteRule.None,
+    int DefinitionGroup = -1)
 {
     /// <summary>Boundary allowance so a character stopped just outside a no-fly border still counts as inside.</summary>
     public const float BoundaryMargin = 2f;
@@ -134,27 +139,49 @@ public sealed class NoFlyZoneCatalog(
     }
 
     /// <summary>Returns a no-fly zone touched by the padded straight route unless that route is exempt.</summary>
-    public NoFlyZone? FindRouteBlocking(uint territoryId, Vector3 origin, Vector3 destination, float margin = 0f)
+    public NoFlyZone? FindRouteBlocking(uint territoryId, Vector3 origin, Vector3 destination, float margin = 0f) =>
+        FindRouteBlocking(this.Load(territoryId), origin, destination, margin);
+
+    /// <summary>Returns the first configured definition whose union blocks this route.</summary>
+    public static NoFlyZone? FindRouteBlocking(
+        IEnumerable<NoFlyZone> zones, Vector3 origin, Vector3 destination, float margin = 0f)
     {
-        foreach (NoFlyZone zone in this.Load(territoryId))
+        foreach (IReadOnlyList<NoFlyZone> group in GroupByDefinition(zones))
         {
-            if (!zone.IntersectsRoute(origin, destination, margin)
-                || zone.IsRouteExempt(zone.Contains(origin, margin), zone.Contains(destination, margin)))
+            NoFlyZone? touched = null;
+            foreach (NoFlyZone zone in group)
+            {
+                if (!zone.IntersectsRoute(origin, destination, margin))
+                    continue;
+                touched = zone;
+                break;
+            }
+
+            if (touched is not { } blocking)
                 continue;
-            return zone;
+            bool originInside = group.Any(zone => zone.Contains(origin, margin));
+            bool destinationInside = group.Any(zone => zone.Contains(destination, margin));
+            if (!blocking.IsRouteExempt(originInside, destinationInside))
+                return blocking;
         }
 
         return null;
     }
 
     /// <summary>Returns whether every no-fly zone touched by this route grants a special exemption.</summary>
-    public bool IsRouteExempt(uint territoryId, Vector3 origin, Vector3 destination)
+    public bool IsRouteExempt(uint territoryId, Vector3 origin, Vector3 destination) =>
+        IsRouteExempt(this.Load(territoryId), origin, destination);
+
+    /// <summary>Returns whether every configured definition touched by this route grants a special exemption.</summary>
+    public static bool IsRouteExempt(IEnumerable<NoFlyZone> zones, Vector3 origin, Vector3 destination)
     {
-        foreach (NoFlyZone zone in this.Load(territoryId))
+        foreach (IReadOnlyList<NoFlyZone> group in GroupByDefinition(zones))
         {
-            if (!zone.IntersectsRoute(origin, destination))
+            if (!group.Any(zone => zone.IntersectsRoute(origin, destination)))
                 continue;
-            if (!zone.IsRouteExempt(zone.Contains(origin), zone.Contains(destination)))
+            bool originInside = group.Any(zone => zone.Contains(origin));
+            bool destinationInside = group.Any(zone => zone.Contains(destination));
+            if (!group[0].IsRouteExempt(originInside, destinationInside))
                 return false;
         }
 
@@ -177,16 +204,18 @@ public sealed class NoFlyZoneCatalog(
     {
         if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination))
             return null;
-        foreach (NoFlyZone zone in zones)
+        foreach (IReadOnlyList<NoFlyZone> group in GroupByDefinition(zones))
         {
-            if (zone.TransferPoint is not { } waypoint)
+            if (!group.Any(zone => zone.IntersectsRoute(origin, destination)))
                 continue;
-            if (!zone.IntersectsRoute(origin, destination))
+            // Route categories belong to the configured union, not to an individual rectangle or map range.
+            bool originInside = group.Any(zone => zone.Contains(origin));
+            bool destinationInside = group.Any(zone => zone.Contains(destination));
+            if (!NoFlyZone.CrossesBoundary(originInside, destinationInside))
                 continue;
-            // Moving within a zone or passing by it is not a boundary crossing, so it needs no transfer.
-            if (!NoFlyZone.CrossesBoundary(zone.Contains(origin), zone.Contains(destination)))
-                continue;
-            return waypoint;
+            foreach (NoFlyZone zone in group)
+                if (zone.TransferPoint is { } waypoint)
+                    return waypoint;
         }
 
         return null;
@@ -202,19 +231,21 @@ public sealed class NoFlyZoneCatalog(
         {
             if (definition.TerritoryId != territoryId)
                 continue;
+            // Every resolved volume from one definition shares a union for route classification.
+            int definitionGroup = zones.Count;
             if (definition.PlaceNameIds.Count > 0)
-                zones.AddRange(this.LoadPlaceNameZones(definition));
+                zones.AddRange(this.LoadPlaceNameZones(definition, definitionGroup));
             if (definition.Rectangles.Count == 0 || map is not { } mapRow || mapRow.SizeFactor == 0)
                 continue;
             foreach (NoFlyMapRectangle rectangle in definition.Rectangles)
-                zones.Add(CreateMapRectangleZone(definition, rectangle, mapRow));
+                zones.Add(CreateMapRectangleZone(definition, rectangle, mapRow, definitionGroup));
         }
 
         this.cache[territoryId] = zones;
         return zones;
     }
 
-    private IEnumerable<NoFlyZone> LoadPlaceNameZones(NoFlyZoneDefinition definition)
+    private IEnumerable<NoFlyZone> LoadPlaceNameZones(NoFlyZoneDefinition definition, int definitionGroup)
     {
         var territory = dataManager.GetExcelSheet<TerritoryType>()!.GetRowOrDefault(definition.TerritoryId);
         if (territory is not { } row)
@@ -240,7 +271,8 @@ public sealed class NoFlyZoneCatalog(
                     ? names.GetRowOrDefault(range.PlaceNameBlock)?.Name.ToString() ?? $"PlaceName {range.PlaceNameBlock}"
                     : definition.Name,
                 definition.TransferPoint,
-                definition.RouteRule);
+                definition.RouteRule,
+                definitionGroup);
         }
     }
 
@@ -253,7 +285,8 @@ public sealed class NoFlyZoneCatalog(
     public static NoFlyZone CreateMapRectangleZone(
         NoFlyZoneDefinition definition,
         NoFlyMapRectangle rectangle,
-        Map map)
+        Map map,
+        int definitionGroup = -1)
     {
         Vector3 first = ConvertMapCoordinate(map, rectangle.FirstMapCoordinate);
         Vector3 second = ConvertMapCoordinate(map, rectangle.SecondMapCoordinate);
@@ -265,7 +298,33 @@ public sealed class NoFlyZoneCatalog(
             new Vector3((max.X - min.X) * 0.5f, float.MaxValue, (max.Z - min.Z) * 0.5f),
             definition.Name,
             definition.TransferPoint,
-            definition.RouteRule);
+            definition.RouteRule,
+            definitionGroup);
+    }
+
+    private static IEnumerable<IReadOnlyList<NoFlyZone>> GroupByDefinition(IEnumerable<NoFlyZone> zones)
+    {
+        List<IReadOnlyList<NoFlyZone>> ordered = [];
+        Dictionary<int, List<NoFlyZone>> groups = [];
+        foreach (NoFlyZone zone in zones)
+        {
+            if (zone.DefinitionGroup < 0)
+            {
+                ordered.Add([zone]);
+                continue;
+            }
+
+            if (!groups.TryGetValue(zone.DefinitionGroup, out List<NoFlyZone>? members))
+            {
+                members = [];
+                groups.Add(zone.DefinitionGroup, members);
+                ordered.Add(members);
+            }
+
+            members.Add(zone);
+        }
+
+        return ordered;
     }
 
     public static Vector3 ConvertMapCoordinate(Map map, Vector2 coordinate) => new(

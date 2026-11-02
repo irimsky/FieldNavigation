@@ -289,6 +289,15 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         NoFlyExempt = navigate!.IgnoreNoFlyZones || zones.IsRouteExempt(frame.Travel.Territory, operationOrigin, candidate),
         CanFly = frame.Travel.CanFly && navigate.Movement.AllowFlight && navigate.Movement.AllowMount && !forceGround,
     };
+    /// <summary>
+    /// Transfer points belong to flight planning. Only a journey explicitly planned end-to-end on the
+    /// ground skips them; temporary footing from combat, a missing mount or lost flight does not.
+    /// </summary>
+    public static bool PlansTransferPoint(
+        TravelMovementMode requestedMode, bool ignoreNoFlyZones, bool exitReached) =>
+        !exitReached && !ignoreNoFlyZones
+        && requestedMode is not (TravelMovementMode.Foot or TravelMovementMode.GroundMount);
+
     private void StartJourney(RuntimeFrame frame)
     {
         var request = navigate!;
@@ -302,9 +311,10 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         var observation = Observe(frame);
         bool combatFootDowngrade = request.Movement.AllowDuringCombat && frame.InCombat
             && frame.Travel.Dismounted && !frame.Travel.Flight.InFlight;
-        // Boundary crossings visit the transfer point even when the character cannot fly or the host
-        // requested a ground-only mode; the journey decides whether that leg is flown or walked.
-        Vector3? waypoint = !exitReached && !combatFootDowngrade && !request.IgnoreNoFlyZones
+        // Boundary crossings visit the transfer point whenever the original plan involved flight,
+        // even if the character is temporarily grounded. The journey decides whether that leg is
+        // flown or walked; only an explicitly ground-only journey skips the transfer point.
+        Vector3? waypoint = PlansTransferPoint(request.Movement.Mode, request.IgnoreNoFlyZones, exitReached)
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;
