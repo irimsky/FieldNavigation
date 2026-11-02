@@ -150,11 +150,11 @@ public sealed class TravelJourney : IDisposable
         Vector3 modeTarget = this.request.IntermediateWaypoint ?? this.target;
         bool transferCanFly = this.request.IntermediateWaypoint is not null
             && this.request.Movement.AllowMount && this.request.Movement.AllowFlight
-            && frame.CanFly && frame.NoFlyExempt;
+            && frame.CanFly && !this.groundLocked;
         this.selected = transferCanFly
             ? TravelMovementMode.Fly
             : this.request.Movement.Select(frame.Position, modeTarget,
-                frame.CanFly && (this.request.IntermediateWaypoint is null || frame.NoFlyExempt));
+                frame.CanFly && this.request.IntermediateWaypoint is null);
         // A journey that already lost flight or committed to its final walk must not
         // relaunch because a moving target or a height difference selects Fly again.
         if (this.groundLocked && this.request.IntermediateWaypoint is null && this.selected == TravelMovementMode.Fly)
@@ -243,7 +243,7 @@ public sealed class TravelJourney : IDisposable
         if (intermediate)
         {
             bool airborneTransfer = this.request.IntermediateWaypointNeedsFloor && frame.CanFly
-                && this.noFlyExempt && !this.noFly.GroundOnly;
+                && !this.noFly.GroundOnly;
             if (this.intermediateDestination is null
                 || this.request.IntermediateWaypointNeedsFloor && this.intermediateDestinationAirborne != airborneTransfer)
             {
@@ -274,7 +274,9 @@ public sealed class TravelJourney : IDisposable
         }
         bool inRange = this.ContainsGoal(frame.Position);
         bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
-        Vector3 landingPoint = this.request.LandingPoint ?? this.approach;
+        Vector3 landingPoint = this.IntermediateWaypointPending && this.intermediateFloor is { } transferFloor
+            ? new Vector3(this.request.IntermediateWaypoint!.Value.X, transferFloor.Y, this.request.IntermediateWaypoint.Value.Z)
+            : this.request.LandingPoint ?? this.approach;
         if (!intermediate && this.State is (TravelJourneyState.Preparing or TravelJourneyState.Travelling))
         {
             if (frame.Flight.InFlight && needsLand
@@ -307,6 +309,14 @@ public sealed class TravelJourney : IDisposable
                     this.request.LandingStrategy == TravelLandingStrategy.ExactPoint ? landingPoint : null) != LandingStatus.Landed)
             { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, "正在落地并等待稳定"); }
             this.landing.Reset();
+            if (this.IntermediateWaypointPending)
+            {
+                this.intermediateReached = true;
+                this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+                this.Change(TravelJourneyState.Travelling, "已在中转点落地，改走地面前往目标");
+                this.Pump(true);
+                return this.Update(NavigationTravelOutcome.Progress, this.reason);
+            }
             this.Change(TravelJourneyState.Dismounting, "落地已稳定");
         }
         if (this.State == TravelJourneyState.Dismounting)
@@ -344,7 +354,7 @@ public sealed class TravelJourney : IDisposable
 
         bool fly = this.routeStarted ? this.travel.Mode == NavigationTravelMode.Fly : this.selected == TravelMovementMode.Fly;
         // A non-exempt crossing is walked to the transfer point even when the character could fly.
-        if (this.noFly.GroundOnly || !frame.CanFly || intermediate && !this.noFlyExempt) fly = false;
+        if (this.noFly.GroundOnly || !frame.CanFly || intermediate && !this.intermediateDestinationAirborne) fly = false;
         else if (this.selected == TravelMovementMode.Fly && this.routeStarted
             && this.travel.GroundReason is NavigationGroundReason.NoFlyOrigin or NavigationGroundReason.NoFlyEntry)
             fly = true;
@@ -445,6 +455,12 @@ public sealed class TravelJourney : IDisposable
             this.routeStarted = false;
             if (intermediate)
             {
+                if (fly && frame.Flight.InFlight && !this.noFlyExempt)
+                {
+                    this.travel.Cancel(); this.routeStarted = false; this.landing.Reset();
+                    this.Change(TravelJourneyState.Landing, "已飞到离区中转点，落地后步行");
+                    return this.Update(NavigationTravelOutcome.Progress, this.reason);
+                }
                 this.intermediateReached = true;
                 this.Change(TravelJourneyState.Travelling, "已到达离区中转点，继续前往原目标");
                 this.Pump(true);
