@@ -76,6 +76,8 @@ public sealed class TravelJourney : IDisposable
     private uint territory;
     private bool noFlyExempt;
     private Vector3? intermediateDestination;
+    private Vector3? intermediateFloor;
+    private bool intermediateDestinationAirborne;
     private string reason = "尚未开始";
     public TravelJourneyState State { get; private set; }
     public bool IsMountPreparationActive => this.State == TravelJourneyState.Preparing && this.ownsMount;
@@ -136,9 +138,18 @@ public sealed class TravelJourney : IDisposable
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
         this.combatDowngradeMode = null;
-        this.selected = this.request.IntermediateWaypoint is not null && this.request.Movement.AllowMount
-            && this.request.Movement.AllowFlight && frame.CanFly
-            ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
+        this.noFlyExempt = frame.NoFlyExempt;
+        this.intermediateDestination = null;
+        this.intermediateFloor = null;
+        this.intermediateDestinationAirborne = false;
+        Vector3 modeTarget = this.request.IntermediateWaypoint ?? this.target;
+        bool transferCanFly = this.request.IntermediateWaypoint is not null
+            && this.request.Movement.AllowMount && this.request.Movement.AllowFlight
+            && frame.CanFly && frame.NoFlyExempt;
+        this.selected = transferCanFly
+            ? TravelMovementMode.Fly
+            : this.request.Movement.Select(frame.Position, modeTarget,
+                frame.CanFly && (this.request.IntermediateWaypoint is null || frame.NoFlyExempt));
         // A journey that already lost flight or committed to its final walk must not
         // relaunch because a moving target or a height difference selects Fly again.
         if (this.groundLocked && this.request.IntermediateWaypoint is null && this.selected == TravelMovementMode.Fly)
@@ -219,28 +230,39 @@ public sealed class TravelJourney : IDisposable
 
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
+        if (!frame.CanFly && this.selected == TravelMovementMode.Fly)
+            this.selected = this.request.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
         bool intermediate = this.IntermediateWaypointPending;
         if (intermediate)
         {
-            if (this.intermediateDestination is null)
+            bool airborneTransfer = this.request.IntermediateWaypointNeedsFloor && frame.CanFly
+                && this.noFlyExempt && !this.noFly.GroundOnly;
+            if (this.intermediateDestination is null
+                || this.request.IntermediateWaypointNeedsFloor && this.intermediateDestinationAirborne != airborneTransfer)
             {
                 Vector3 waypoint = this.request.IntermediateWaypoint!.Value;
                 if (this.request.IntermediateWaypointNeedsFloor)
                 {
-                    if (!this.backend.TryResolveTravelGroundDestination(waypoint, mapWaypoint: true, out var floor, out _)
-                        || !TravelGeometry.IsFinite(floor))
+                    if (this.intermediateFloor is null)
                     {
-                        if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
-                            return this.Fail("无法解析离区中转点的地面高度");
-                        return this.Update(NavigationTravelOutcome.Progress, "等待解析离区中转点的地面高度");
+                        if (!this.backend.TryResolveTravelGroundDestination(waypoint, mapWaypoint: true, out var resolvedFloor, out _)
+                            || !TravelGeometry.IsFinite(resolvedFloor))
+                        {
+                            if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout)
+                                return this.Fail("无法解析离区中转点的地面高度");
+                            return this.Update(NavigationTravelOutcome.Progress, "等待解析离区中转点的地面高度");
+                        }
+                        this.intermediateFloor = resolvedFloor;
                     }
+                    Vector3 floor = this.intermediateFloor.Value;
                     // Keep the configured X/Z authoritative; floor queries may snap sideways.
                     // A walked transfer stays on the floor; a flown one is raised to cruise height.
-                    waypoint.Y = this.noFly.GroundOnly || !this.noFlyExempt || !frame.CanFly
-                        ? floor.Y
-                        : Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight));
+                    waypoint.Y = airborneTransfer
+                        ? Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight))
+                        : floor.Y;
                 }
                 this.intermediateDestination = waypoint;
+                this.intermediateDestinationAirborne = airborneTransfer;
             }
         }
         bool inRange = this.ContainsGoal(frame.Position);
@@ -459,7 +481,7 @@ public sealed class TravelJourney : IDisposable
         finally { this.landing.Reset(); this.alternativeLanding.Cancel(); this.alternativeLandingStarted = false; this.movement.ResetTakeoff(); }
         if (this.ownsMount && cancelMountCast) this.movement.CancelMountCast(reason);
         this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
-        this.intermediateDestination = null;
+        this.intermediateDestination = null; this.intermediateFloor = null; this.intermediateDestinationAirborne = false;
         this.combatDowngradeMode = null;
         this.groundLocked = false;
         this.State = TravelJourneyState.Cancelled;
