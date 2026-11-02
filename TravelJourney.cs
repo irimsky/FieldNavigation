@@ -88,6 +88,9 @@ public sealed class TravelJourney : IDisposable
         && this.State is TravelJourneyState.Preparing or TravelJourneyState.Travelling;
     public bool IntermediateWaypointReached => this.intermediateReached;
 
+    // State-independent form: the pending property is false while the journey lands at the transfer point.
+    private bool HasPendingTransfer => this.request?.IntermediateWaypoint is not null && !this.intermediateReached;
+
     public TravelJourney(INavigationBackend backend, IDescentControl descent, ITravelMovementControl movement, TimeProvider? clock = null, bool externalRecovery = false)
     {
         this.clock = clock ?? TimeProvider.System;
@@ -274,7 +277,7 @@ public sealed class TravelJourney : IDisposable
         }
         bool inRange = this.ContainsGoal(frame.Position);
         bool needsLand = this.request.Arrival.RequireGrounded || this.request.Arrival.RequireDismounted;
-        Vector3 landingPoint = this.IntermediateWaypointPending && this.intermediateFloor is { } transferFloor
+        Vector3 landingPoint = this.HasPendingTransfer && this.intermediateFloor is { } transferFloor
             ? new Vector3(this.request.IntermediateWaypoint!.Value.X, transferFloor.Y, this.request.IntermediateWaypoint.Value.Z)
             : this.request.LandingPoint ?? this.approach;
         if (!intermediate && this.State is (TravelJourneyState.Preparing or TravelJourneyState.Travelling))
@@ -309,7 +312,7 @@ public sealed class TravelJourney : IDisposable
                     this.request.LandingStrategy == TravelLandingStrategy.ExactPoint ? landingPoint : null) != LandingStatus.Landed)
             { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, "正在落地并等待稳定"); }
             this.landing.Reset();
-            if (this.IntermediateWaypointPending)
+            if (this.HasPendingTransfer)
             {
                 this.intermediateReached = true;
                 this.selected = this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
