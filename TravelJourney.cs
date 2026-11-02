@@ -12,9 +12,9 @@ public sealed record TravelRequest
 {
     /// <summary>Business goal used for final arrival. ApproachPoint/LandingPoint may guide the route elsewhere within this goal's arrival range.</summary>
     public required Vector3 Destination { get; init; }
-    /// <summary>Required airborne checkpoint used before continuing to Destination.</summary>
+    /// <summary>Required boundary-crossing checkpoint: flown through when the route is exempt, walked when it is not or flight is unavailable.</summary>
     public Vector3? IntermediateWaypoint { get; init; }
-    /// <summary>Resolve the floor under a horizontal point (X/Z with placeholder Y) and retain at least the current flight altitude.</summary>
+    /// <summary>Resolve the floor under a horizontal point (X/Z with placeholder Y). Flown transfers keep at least the current altitude; walked transfers use the floor.</summary>
     public bool IntermediateWaypointNeedsFloor { get; init; }
     public float IntermediateWaypointRadius { get; init; } = 3;
     public TravelModePolicy Movement { get; init; } = new();
@@ -136,7 +136,8 @@ public sealed class TravelJourney : IDisposable
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
         this.combatDowngradeMode = null;
-        this.selected = this.request.IntermediateWaypoint is not null && this.request.Movement.AllowMount && this.request.Movement.AllowFlight
+        this.selected = this.request.IntermediateWaypoint is not null && this.request.Movement.AllowMount
+            && this.request.Movement.AllowFlight && frame.CanFly
             ? TravelMovementMode.Fly : this.request.Movement.Select(frame.Position, this.target, frame.CanFly);
         // A journey that already lost flight or committed to its final walk must not
         // relaunch because a moving target or a height difference selects Fly again.
@@ -218,10 +219,9 @@ public sealed class TravelJourney : IDisposable
 
         this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
-        bool intermediate = this.IntermediateWaypointPending && this.selected != TravelMovementMode.Foot;
+        bool intermediate = this.IntermediateWaypointPending;
         if (intermediate)
         {
-            if (!frame.CanFly || this.noFly.GroundOnly) return this.Fail("离区中转要求飞行，但当前飞行条件不可用");
             if (this.intermediateDestination is null)
             {
                 Vector3 waypoint = this.request.IntermediateWaypoint!.Value;
@@ -235,7 +235,10 @@ public sealed class TravelJourney : IDisposable
                         return this.Update(NavigationTravelOutcome.Progress, "等待解析离区中转点的地面高度");
                     }
                     // Keep the configured X/Z authoritative; floor queries may snap sideways.
-                    waypoint.Y = Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight));
+                    // A walked transfer stays on the floor; a flown one is raised to cruise height.
+                    waypoint.Y = this.noFly.GroundOnly || !this.noFlyExempt || !frame.CanFly
+                        ? floor.Y
+                        : Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight));
                 }
                 this.intermediateDestination = waypoint;
             }
@@ -311,7 +314,8 @@ public sealed class TravelJourney : IDisposable
         }
 
         bool fly = this.routeStarted ? this.travel.Mode == NavigationTravelMode.Fly : this.selected == TravelMovementMode.Fly;
-        if (this.noFly.GroundOnly || !frame.CanFly) fly = false;
+        // A non-exempt crossing is walked to the transfer point even when the character could fly.
+        if (this.noFly.GroundOnly || !frame.CanFly || intermediate && !this.noFlyExempt) fly = false;
         else if (this.selected == TravelMovementMode.Fly && this.routeStarted
             && this.travel.GroundReason is NavigationGroundReason.NoFlyOrigin or NavigationGroundReason.NoFlyEntry)
             fly = true;
@@ -393,9 +397,13 @@ public sealed class TravelJourney : IDisposable
             });
             this.routeStarted = true;
         }
-        bool arrived = Vector3.Distance(frame.Position, destination) <= (intermediate
-            ? this.request!.IntermediateWaypointRadius : this.request!.PathArrivalRadius)
-            && (!intermediate || frame.Flight.InFlight);
+        // A transfer waypoint can be walked (after a forced landing) or flown through, so its arrival
+        // is horizontal and does not require the character to still be airborne.
+        float arrivalDistance = intermediate
+            ? TravelGeometry.HorizontalDistance(frame.Position, destination)
+            : Vector3.Distance(frame.Position, destination);
+        bool arrived = arrivalDistance <= (intermediate
+            ? this.request!.IntermediateWaypointRadius : this.request!.PathArrivalRadius);
         var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
             arrived, frame.InsideNoFly && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
         if (result.Outcome == NavigationTravelOutcome.Failed) { this.LastFailureStage = result.FailureStage; return this.Fail(result.Reason); }

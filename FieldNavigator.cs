@@ -302,8 +302,9 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         var observation = Observe(frame);
         bool combatFootDowngrade = request.Movement.AllowDuringCombat && frame.InCombat
             && frame.Travel.Dismounted && !frame.Travel.Flight.InFlight;
-        Vector3? waypoint = !exitReached && observation.CanFly && !combatFootDowngrade
-            && mode is TravelMovementMode.Automatic or TravelMovementMode.Fly
+        // Boundary crossings visit the transfer point even when the character cannot fly or the host
+        // requested a ground-only mode; the journey decides whether that leg is flown or walked.
+        Vector3? waypoint = !exitReached && !combatFootDowngrade && !request.IgnoreNoFlyZones
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;

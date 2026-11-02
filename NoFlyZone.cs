@@ -26,8 +26,9 @@ public readonly record struct NoFlyMapRectangle(Vector2 FirstMapCoordinate, Vect
 /// </summary>
 /// <param name="RouteRule">Route categories that do not force a landing. Other categories use ground navigation.</param>
 /// <param name="TransferPoint">
-/// World X/Z with a placeholder Y. Exempt routes that cross the boundary fly through this point first;
-/// routes that are not exempt land on it before continuing on the ground. Null lets the navigator choose.
+/// World X/Z with a placeholder Y. Every boundary crossing reaches this point first and then continues to
+/// the destination: exempt routes fly through it, non-exempt routes land on it and continue on the ground.
+/// Null lets the navigator choose.
 /// </param>
 public sealed record NoFlyZoneDefinition(
     uint TerritoryId,
@@ -89,6 +90,10 @@ public readonly record struct NoFlyZone(
 
     public bool IsRouteExempt(bool originInside, bool destinationInside) =>
         (this.SpecialRules & Route(originInside, destinationInside)) != 0;
+
+    /// <summary>True when the route changes sides of the volume and must visit its transfer point.</summary>
+    public static bool CrossesBoundary(bool originInside, bool destinationInside) =>
+        originInside != destinationInside;
 }
 
 public sealed class NoFlyZoneCatalog(
@@ -157,25 +162,31 @@ public sealed class NoFlyZoneCatalog(
     }
 
     /// <summary>
-    /// Returns the transfer point of the boundary this flight route is about to cross,
-    /// or null when the route needs no airborne transfer.
+    /// Returns the transfer point every outside-in / inside-out route must visit first,
+    /// or null when the route does not cross a boundary.
     /// </summary>
-    public Vector3? FindFlightExitWaypoint(uint territoryId, Vector3 origin, Vector3 destination)
+    public Vector3? FindFlightExitWaypoint(uint territoryId, Vector3 origin, Vector3 destination) =>
+        FindTransferPoint(this.Load(territoryId), origin, destination);
+
+    /// <summary>
+    /// Pure transfer-point selection shared with tests. Every outside-in / inside-out crossing visits
+    /// the point first; the route rule only decides whether that leg is flown or walked.
+    /// </summary>
+    public static Vector3? FindTransferPoint(
+        IEnumerable<NoFlyZone> zones, Vector3 origin, Vector3 destination)
     {
         if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination))
             return null;
-        foreach (NoFlyZone zone in this.Load(territoryId))
+        foreach (NoFlyZone zone in zones)
         {
-            if (zone.TransferPoint is not { } waypoint || zone.SpecialRules == NoFlyRouteRule.None)
+            if (zone.TransferPoint is not { } waypoint)
                 continue;
             if (!zone.IntersectsRoute(origin, destination))
                 continue;
-            NoFlyRouteRule route = NoFlyZone.Route(zone.Contains(origin), zone.Contains(destination));
             // Moving within a zone or passing by it is not a boundary crossing, so it needs no transfer.
-            if (route is NoFlyRouteRule.InsideToInside or NoFlyRouteRule.OutsideToOutside)
+            if (!NoFlyZone.CrossesBoundary(zone.Contains(origin), zone.Contains(destination)))
                 continue;
-            if ((zone.SpecialRules & route) != 0)
-                return waypoint;
+            return waypoint;
         }
 
         return null;
