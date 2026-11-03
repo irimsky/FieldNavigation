@@ -325,6 +325,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             Destination = target, ApproachPoint = candidate, LandingPoint = candidate,
             GroundKind = request.GroundKind == GroundDestinationKind.MapWaypoint ? GroundDestinationKind.Raw : request.GroundKind,
             Movement = new() { Preferred = mode, WalkDistance = request.Movement.WalkDistance, GroundMountDistance = request.Movement.GroundMountDistance,
+                PreferredMountId = request.Movement.PreferredMountId,
                 AllowMount = mountAllowed, AllowFlight = request.Movement.AllowFlight && !forceGround,
                 AllowDuringCombat = request.Movement.AllowDuringCombat },
             Arrival = request.Arrival.Policy,

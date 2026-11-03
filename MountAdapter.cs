@@ -87,12 +87,14 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
             ? "施法中"
         : this.IsJumping ? "跳跃中" : string.Empty;
 
-    public bool TryMount() => this.TryMount(null);
+    public bool TryMount() => this.TryMount(0, null);
 
-    public bool TryMount(Action? onRequest)
+    public bool TryMount(Action? onRequest) => this.TryMount(0, onRequest);
+
+    public bool TryMount(uint preferredMountId, Action? onRequest)
     {
         bool accepted = this.mountRequests.TryRequest(
-            DateTime.UtcNow, this.State, this.CanAttemptMount, () => this.RequestMount(onRequest));
+            DateTime.UtcNow, this.State, this.CanAttemptMount, () => this.RequestMount(preferredMountId, onRequest));
         if (accepted)
             this.pluginLog?.Debug("[FN_MOUNT] mount request accepted; blockReason={BlockReason}; mounted={Mounted}; nativeMounted={NativeMounted}; transition={Transition}; inFlight={InFlight}; position={Position}",
                 this.MountBlockReason, this.IsMounted, this.IsNativeMounted, this.IsMountTransition, this.IsInFlight,
@@ -100,11 +102,22 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
         return accepted;
     }
 
-    private bool RequestMount(Action? onRequest)
+    private bool RequestMount(uint preferredMountId, Action? onRequest)
     {
         ActionManager* manager = ActionManager.Instance();
-        if (manager == null || manager->GetActionStatus(ActionType.GeneralAction, MountRouletteActionId) != 0)
+        if (manager == null)
             return false;
+        ActionType actionType = ActionType.GeneralAction;
+        uint actionId = MountRouletteActionId;
+        if (preferredMountId != 0 && manager->GetActionStatus(ActionType.Mount, preferredMountId) == 0)
+        {
+            actionType = ActionType.Mount;
+            actionId = preferredMountId;
+        }
+        else if (manager->GetActionStatus(ActionType.GeneralAction, MountRouletteActionId) != 0)
+        {
+            return false;
+        }
         TargetSystem* targets = TargetSystem.Instance();
         if (targets != null)
         {
@@ -114,9 +127,9 @@ public sealed unsafe class MountAdapter(ICondition condition, IObjectTable objec
 
         this.mountCastOwner = objectTable.LocalPlayer?.GameObjectId;
         onRequest?.Invoke();
-        bool accepted = manager->UseAction(ActionType.GeneralAction, MountRouletteActionId);
-        this.pluginLog?.Debug("[FN_MOUNT] UseAction mount result={Result}; owner={Owner}; position={Position}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}",
-            accepted, this.mountCastOwner ?? 0UL, objectTable.LocalPlayer is { } p ? p.Position : Vector3.Zero,
+        bool accepted = manager->UseAction(actionType, actionId);
+        this.pluginLog?.Debug("[FN_MOUNT] UseAction mount result={Result}; action={ActionType}/{ActionId}; owner={Owner}; position={Position}; inCombat={InCombat}; casting={Casting}; occupied={Occupied}",
+            accepted, actionType, actionId, this.mountCastOwner ?? 0UL, objectTable.LocalPlayer is { } p ? p.Position : Vector3.Zero,
             condition[ConditionFlag.InCombat], condition[ConditionFlag.Casting] || condition[ConditionFlag.Casting87],
             condition[ConditionFlag.Occupied] || condition[ConditionFlag.OccupiedInEvent] || condition[ConditionFlag.OccupiedInQuestEvent]);
         return accepted;

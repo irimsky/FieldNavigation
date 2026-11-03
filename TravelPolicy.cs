@@ -14,6 +14,8 @@ public sealed record TravelModePolicy
     public bool AllowDuringCombat { get; init; }
     public bool AllowMount { get; init; } = true;
     public bool AllowFlight { get; init; } = true;
+    /// <summary>Mount row id to summon, or 0 to use the mount roulette.</summary>
+    public uint PreferredMountId { get; init; }
 
     public TravelMovementMode Select(Vector3 origin, Vector3 target, bool canFly)
     {
@@ -79,7 +81,7 @@ public static class TravelGeometry
 /// <summary>Framework-only actions; the session observes actual state before advancing.</summary>
 public interface ITravelMovementControl : ITravelRecoveryControl
 {
-    bool TryMount(Action onRequest);
+    bool TryMount(uint preferredMountId, Action? onRequest);
     bool TryDismount();
     bool TryTakeoff(DateTime now);
     /// <summary>Native state currently accepts a takeoff request (mounted, on the ground, flight allowed). Combat is not a blocker.</summary>
@@ -91,7 +93,7 @@ public interface ITravelMovementControl : ITravelRecoveryControl
 
 public sealed class TravelMovementControl(MountAdapter mount, TakeoffAdapter takeoff) : ITravelMovementControl
 {
-    public bool TryMount(Action onRequest) => mount.TryMount(onRequest);
+    public bool TryMount(uint preferredMountId, Action? onRequest) => mount.TryMount(preferredMountId, onRequest);
     public bool TryDismount() => mount.TryDismount();
     public bool TryTakeoff(DateTime now) => takeoff.TryTakeoff(now, true);
     public bool CanTakeoff => takeoff.IsReady;

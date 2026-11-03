@@ -375,7 +375,7 @@ public sealed class TravelJourney : IDisposable
             { this.travel.Cancel(); this.routeStarted = false; this.movement.ResetTakeoff(); this.preparingTakeoff = false; this.Change(TravelJourneyState.Preparing, "骑乘状态变化，重新准备"); }
             if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.PreparationTimeout) return this.Fail("召唤坐骑超时");
             if (this.mountRequests < this.request.MaximumMountRequests)
-                this.movement.TryMount(() => { this.ownsMount = true; this.mountRequests++; });
+                this.movement.TryMount(this.request!.Movement.PreferredMountId, () => { this.ownsMount = true; this.mountRequests++; });
             return this.Update(NavigationTravelOutcome.Progress, "等待实际骑乘");
         }
         this.ownsMount = false;
