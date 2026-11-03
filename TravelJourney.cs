@@ -246,7 +246,7 @@ public sealed class TravelJourney : IDisposable
         if (intermediate)
         {
             bool airborneTransfer = this.request.IntermediateWaypointNeedsFloor && frame.CanFly
-                && !this.noFly.GroundOnly;
+                && !this.noFly.GroundOnly && frame.NoFlyExempt;
             if (this.intermediateDestination is null
                 || this.request.IntermediateWaypointNeedsFloor && this.intermediateDestinationAirborne != airborneTransfer)
             {
