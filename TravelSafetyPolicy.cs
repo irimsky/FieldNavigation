@@ -73,6 +73,14 @@ public sealed class NoFlyTravelPolicy
         this.GroundOnly = false;
     }
 
+    /// <summary>Deterministically locks the session to ground at a transfer point without the boundary debounce.</summary>
+    public void LockGround()
+    {
+        this.initialized = true;
+        this.enteredAt = this.leftAt = null;
+        this.GroundOnly = true;
+    }
+
     public void Reset()
     {
         this.initialized = false;

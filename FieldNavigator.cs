@@ -316,6 +316,9 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
         bool canFlyNow = observation.CanFly && mountAllowed && !combatFootDowngrade;
         Vector3? waypoint = PlansTransferPoint(mode, request.IgnoreNoFlyZones, exitReached, canFlyNow)
             ? zones.FindFlightExitWaypoint(frame.Travel.Territory, operationOrigin, target) : null;
+        NoFlyRouteRule crossing = waypoint is not null
+            ? zones.ClassifyRoute(frame.Travel.Territory, operationOrigin, target)
+            : NoFlyRouteRule.None;
         navigation.Paths.MaximumPathLength = float.PositiveInfinity;
         navigation.Paths.QueryTimeout = request.Recovery.PathfindTimeout;
         Trace("journey-start", $"target={target}; candidate={candidate}; selectedMode={mode}; allowMount={mountAllowed}; allowFlight={request.Movement.AllowFlight && !forceGround}; canFly={observation.CanFly}; combatFootDowngrade={combatFootDowngrade}; inFlight={frame.Travel.Flight.InFlight}; groundKind={request.GroundKind}; arrival={request.Arrival.Radius}; heightTolerance={request.Arrival.HeightTolerance}; use3D={request.Arrival.Use3DDistance}; requireStationary={request.Arrival.RequireStationary}");
@@ -331,6 +334,7 @@ public sealed class FieldNavigator : IDisposable, IAsyncDisposable
             Arrival = request.Arrival.Policy,
             LandingRadius = request.LandingRadius, FlightHeight = request.FlightHeight,
             IntermediateWaypoint = waypoint, IntermediateWaypointNeedsFloor = true,
+            IntermediateCrossing = crossing,
             OperationTimeout = request.Recovery.TotalTimeout - clock.GetElapsedTime(started),
             StallTimeout = request.Recovery.StallTimeout, StopOnStall = true,
         }, observation);

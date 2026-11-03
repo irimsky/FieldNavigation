@@ -224,6 +224,28 @@ public sealed class NoFlyZoneCatalog(
         return null;
     }
 
+    /// <summary>Deterministic route category of the first configured definition touched by the route.</summary>
+    public NoFlyRouteRule ClassifyRoute(uint territoryId, Vector3 origin, Vector3 destination) =>
+        ClassifyRoute(this.Load(territoryId), origin, destination);
+
+    /// <summary>Route category of the first configured group whose volume intersects the route.</summary>
+    public static NoFlyRouteRule ClassifyRoute(
+        IEnumerable<NoFlyZone> zones, Vector3 origin, Vector3 destination)
+    {
+        if (!TravelGeometry.IsFinite(origin) || !TravelGeometry.IsFinite(destination))
+            return NoFlyRouteRule.None;
+        foreach (IReadOnlyList<NoFlyZone> group in GroupByDefinition(zones))
+        {
+            if (!group.Any(zone => zone.IntersectsRoute(origin, destination)))
+                continue;
+            bool originInside = group.Any(zone => zone.Contains(origin));
+            bool destinationInside = group.Any(zone => zone.Contains(destination));
+            return NoFlyZone.Route(originInside, destinationInside);
+        }
+
+        return NoFlyRouteRule.None;
+    }
+
     public IReadOnlyList<NoFlyZone> Load(uint territoryId)
     {
         if (this.cache.TryGetValue(territoryId, out IReadOnlyList<NoFlyZone>? cached))

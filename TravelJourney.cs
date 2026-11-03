@@ -17,6 +17,8 @@ public sealed record TravelRequest
     /// <summary>Resolve the floor under a horizontal point (X/Z with placeholder Y). Flown transfers keep at least the current altitude; walked transfers use the floor.</summary>
     public bool IntermediateWaypointNeedsFloor { get; init; }
     public float IntermediateWaypointRadius { get; init; } = 3;
+    /// <summary>Deterministic no-fly crossing direction for the intermediate waypoint. Entry locks ground; exit regains flight. None without a transfer.</summary>
+    public NoFlyRouteRule IntermediateCrossing { get; init; }
     public TravelModePolicy Movement { get; init; } = new();
     public TravelArrivalPolicy Arrival { get; init; } = new();
     public bool FindApproachPoint { get; init; }
@@ -75,6 +77,7 @@ public sealed class TravelJourney : IDisposable
     private ulong character;
     private uint territory;
     private bool noFlyExempt;
+    private bool? noFlyInsideOverride;
     private Vector3? intermediateDestination;
     private Vector3? intermediateFloor;
     private bool intermediateDestinationAirborne;
@@ -147,6 +150,7 @@ public sealed class TravelJourney : IDisposable
             : this.target);
         this.combatDowngradeMode = null;
         this.noFlyExempt = frame.NoFlyExempt;
+        this.noFlyInsideOverride = null;
         this.intermediateDestination = null;
         this.intermediateFloor = null;
         this.intermediateDestinationAirborne = false;
@@ -236,7 +240,7 @@ public sealed class TravelJourney : IDisposable
             }
         }
 
-        this.noFly.Update(frame.Now, frame.InsideNoFly && !this.noFlyExempt,
+        this.noFly.Update(frame.Now, this.InsideNoFly(frame) && !this.noFlyExempt,
             this.State == TravelJourneyState.Landing || this.travel.State == NavigationTravelState.Landing);
         if (!frame.CanFly && this.selected == TravelMovementMode.Fly)
             this.selected = this.request.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
@@ -303,7 +307,7 @@ public sealed class TravelJourney : IDisposable
                 if (!this.alternativeLandingStarted)
                 { this.alternativeLanding.Start(frame.Now, frame.Position, this.target, this.request.LandingRecoveryRadius); this.alternativeLandingStarted = true; }
                 var attempt = this.alternativeLanding.Tick(frame.Now, frame.Position, frame.Flight.InFlight,
-                    frame.InsideNoFly && !this.noFlyExempt);
+                    this.InsideNoFly(frame) && !this.noFlyExempt);
                 if (attempt.State == CombatLandingState.Failed) return this.Fail(attempt.Reason);
                 if (attempt.State != CombatLandingState.Landed)
                 { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, attempt.Reason); }
@@ -430,7 +434,7 @@ public sealed class TravelJourney : IDisposable
             this.travel.Cancel();
             if (this.backend is INavigationPump pump) pump.DirectGround = final && this.request!.DirectGroundApproach;
             this.routeTarget = destination;
-            this.travel.Start(frame.Now, frame.Position, destination, frame.InsideNoFly, new()
+            this.travel.Start(frame.Now, frame.Position, destination, this.InsideNoFly(frame), new()
             {
                 GroundKind = this.request!.GroundKind,
                 InitialIntent = fly ? NavigationTravelIntent.Fly : NavigationTravelIntent.Ground,
@@ -450,7 +454,7 @@ public sealed class TravelJourney : IDisposable
         bool arrived = arrivalDistance <= (intermediate
             ? this.request!.IntermediateWaypointRadius : this.request!.PathArrivalRadius);
         var result = this.travel.Tick(new(frame.Now, frame.Position, Vector3.Distance(frame.Position, destination),
-            arrived, frame.InsideNoFly && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
+            arrived, this.InsideNoFly(frame) && !this.noFlyExempt, frame.Flight, frame.NoFlyLandingPoint));
         if (result.Outcome == NavigationTravelOutcome.Failed) { this.LastFailureStage = result.FailureStage; return this.Fail(result.Reason); }
         if (result.Outcome == NavigationTravelOutcome.Arrived)
         {
@@ -484,6 +488,8 @@ public sealed class TravelJourney : IDisposable
         frame.CanFly && !this.groundLocked && this.request!.Movement.AllowMount && this.request.Movement.AllowFlight
         && !(this.request.Movement.AllowDuringCombat && frame.InCombat && frame.Dismounted && !frame.Flight.InFlight);
 
+    private bool InsideNoFly(TravelObservation frame) => this.noFlyInsideOverride ?? frame.InsideNoFly;
+
     /// <summary>Reaching a configured transfer point releases the zone rules for the remainder of this journey.</summary>
     private void CompleteTransfer(TravelObservation frame)
     {
@@ -491,17 +497,32 @@ public sealed class TravelJourney : IDisposable
         if (frame.NoFlyExempt)
         {
             this.noFlyExempt = true;
+            this.noFlyInsideOverride = null;
+            this.groundLocked = false;
             this.noFly.ClearGroundLock();
             this.selected = frame.CanFly ? TravelMovementMode.Fly
                 : this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
             this.Change(TravelJourneyState.Travelling, "已到达中转点，后续忽略禁飞区");
         }
+        else if (this.request!.IntermediateCrossing == NoFlyRouteRule.OutsideToInside)
+        {
+            this.noFlyExempt = false;
+            this.noFlyInsideOverride = true;
+            this.noFly.LockGround();
+            this.groundLocked = true;
+            this.selected = this.request.Movement.AllowMount
+                ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+            this.Change(TravelJourneyState.Travelling, "已在中转点落地，地面进入禁飞区");
+        }
         else
         {
             this.noFlyExempt = false;
-            this.selected = this.request!.Movement.AllowMount
-                ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
-            this.Change(TravelJourneyState.Travelling, "已在中转点落地，地面通过禁飞区");
+            this.noFlyInsideOverride = false;
+            this.noFly.ClearGroundLock();
+            this.groundLocked = false;
+            this.selected = frame.CanFly ? TravelMovementMode.Fly
+                : this.request.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+            this.Change(TravelJourneyState.Travelling, "已离开禁飞区，恢复飞行");
         }
     }
 
@@ -548,6 +569,7 @@ public sealed class TravelJourney : IDisposable
         if (this.ownsMount && cancelMountCast) this.movement.CancelMountCast(reason);
         this.ownsMount = false; this.routeStarted = false; this.settled = null; this.preparingTakeoff = false; this.intermediateReached = false;
         this.intermediateDestination = null; this.intermediateFloor = null; this.intermediateDestinationAirborne = false;
+        this.noFlyInsideOverride = null;
         this.combatDowngradeMode = null;
         this.groundLocked = false;
         this.State = TravelJourneyState.Cancelled;
