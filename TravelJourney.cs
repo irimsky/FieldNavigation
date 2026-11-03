@@ -146,7 +146,7 @@ public sealed class TravelJourney : IDisposable
             ? TravelGeometry.FindApproachPoint(frame.Position, this.target, this.backend.FindNearestReachablePoint, this.request.Arrival) ?? this.target
             : this.target);
         this.combatDowngradeMode = null;
-        this.noFlyExempt = this.intermediateReached || frame.NoFlyExempt;
+        this.noFlyExempt = frame.NoFlyExempt;
         this.intermediateDestination = null;
         this.intermediateFloor = null;
         this.intermediateDestinationAirborne = false;
@@ -246,7 +246,7 @@ public sealed class TravelJourney : IDisposable
         if (intermediate)
         {
             bool airborneTransfer = this.request.IntermediateWaypointNeedsFloor && frame.CanFly
-                && !this.noFly.GroundOnly && frame.NoFlyExempt;
+                && !this.noFly.GroundOnly;
             if (this.intermediateDestination is null
                 || this.request.IntermediateWaypointNeedsFloor && this.intermediateDestinationAirborne != airborneTransfer)
             {
@@ -267,7 +267,7 @@ public sealed class TravelJourney : IDisposable
                     Vector3 floor = this.intermediateFloor.Value;
                     // Keep the configured X/Z authoritative; floor queries may snap sideways.
                     // A walked transfer stays on the floor; a flown one is raised to cruise height.
-                    waypoint.Y = airborneTransfer
+                    waypoint.Y = airborneTransfer && frame.NoFlyExempt
                         ? Math.Max(frame.Position.Y, floor.Y + Math.Max(4, this.request.FlightHeight))
                         : floor.Y;
                 }
@@ -298,7 +298,7 @@ public sealed class TravelJourney : IDisposable
         if (this.State == TravelJourneyState.Landing)
         {
             if (this.clock.GetElapsedTime(this.phaseStarted) >= this.request.LandingTimeout) return this.Fail("落地时间预算已耗尽");
-            if (this.request.LandingStrategy == TravelLandingStrategy.AroundTarget)
+            if (this.request.LandingStrategy == TravelLandingStrategy.AroundTarget && !this.HasPendingTransfer)
             {
                 if (!this.alternativeLandingStarted)
                 { this.alternativeLanding.Start(frame.Now, frame.Position, this.target, this.request.LandingRecoveryRadius); this.alternativeLandingStarted = true; }
@@ -309,7 +309,8 @@ public sealed class TravelJourney : IDisposable
                 { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, attempt.Reason); }
             }
             if (this.landing.Update(frame.Now, frame.Position, frame.Flight,
-                    this.request.LandingStrategy == TravelLandingStrategy.ExactPoint ? landingPoint : null) != LandingStatus.Landed)
+                    this.HasPendingTransfer || this.request.LandingStrategy == TravelLandingStrategy.ExactPoint
+                        ? landingPoint : null) != LandingStatus.Landed)
             { this.Pump(frame.Flight.InFlight); return this.Update(NavigationTravelOutcome.Progress, "正在落地并等待稳定"); }
             this.landing.Reset();
             if (this.HasPendingTransfer)
@@ -456,6 +457,13 @@ public sealed class TravelJourney : IDisposable
             this.routeStarted = false;
             if (intermediate)
             {
+                if (!frame.NoFlyExempt && frame.Flight.InFlight)
+                {
+                    this.travel.Cancel(); this.routeStarted = false;
+                    this.landing.Reset();
+                    this.Change(TravelJourneyState.Landing, "抵达离区中转点，先落地再继续");
+                    return this.Update(NavigationTravelOutcome.Progress);
+                }
                 this.CompleteTransfer(frame);
                 this.Pump(true);
                 return this.Update(NavigationTravelOutcome.Progress, this.reason);
@@ -480,11 +488,21 @@ public sealed class TravelJourney : IDisposable
     private void CompleteTransfer(TravelObservation frame)
     {
         this.intermediateReached = true;
-        this.noFlyExempt = true;
-        this.noFly.ClearGroundLock();
-        this.selected = frame.CanFly ? TravelMovementMode.Fly
-            : this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
-        this.Change(TravelJourneyState.Travelling, "已到达中转点，后续忽略禁飞区");
+        if (frame.NoFlyExempt)
+        {
+            this.noFlyExempt = true;
+            this.noFly.ClearGroundLock();
+            this.selected = frame.CanFly ? TravelMovementMode.Fly
+                : this.request!.Movement.AllowMount ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+            this.Change(TravelJourneyState.Travelling, "已到达中转点，后续忽略禁飞区");
+        }
+        else
+        {
+            this.noFlyExempt = false;
+            this.selected = this.request!.Movement.AllowMount
+                ? TravelMovementMode.GroundMount : TravelMovementMode.Foot;
+            this.Change(TravelJourneyState.Travelling, "已在中转点落地，地面通过禁飞区");
+        }
     }
 
     private void AbandonIntermediateWaypoint(TravelObservation frame)
